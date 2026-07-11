@@ -834,6 +834,8 @@ def test_hub_data_directory_rejects_unc_and_onedrive():
         get_hub_config({"WXA_HUB_DATA_DIR": r"\\server\share\hub-data"})
     with pytest.raises(ValueError, match="OneDrive"):
         get_hub_config({"WXA_HUB_DATA_DIR": r"C:\Users\Alice\OneDrive\hub-data"})
+    with pytest.raises(ValueError, match="OneDrive"):
+        get_hub_config({"WXA_HUB_DATA_DIR": "/srv/OneDrive - Team/hub-data"})
 
 
 def test_enrollment_rate_limit_uses_direct_peer_and_ignores_forwarded_ip(hub):

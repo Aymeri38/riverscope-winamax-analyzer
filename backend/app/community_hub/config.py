@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +44,17 @@ def _positive_int(env: dict[str, str] | os._Environ[str], name: str, default: in
     return value
 
 
+def _contains_cloud_directory(value: str | Path) -> bool:
+    # Split both path syntaxes before using the host OS Path implementation.
+    # Otherwise a Windows path is one opaque POSIX segment on the Linux hub.
+    parts = tuple(part for part in re.split(r"[\\/]+", str(value)) if part)
+    cloud_parts = {"onedrive", "onedriveconsumer", "onedrivecommercial"}
+    return any(
+        part.casefold() in cloud_parts or part.casefold().startswith("onedrive -")
+        for part in parts
+    )
+
+
 def get_hub_config(environ: dict[str, str] | os._Environ[str] | None = None) -> HubConfig:
     env = environ if environ is not None else os.environ
     configured_value = str(env.get("WXA_HUB_DATA_DIR", PROJECT_ROOT / "hub-data"))
@@ -52,11 +64,7 @@ def get_hub_config(environ: dict[str, str] | os._Environ[str] | None = None) -> 
     if not configured_data_dir.is_absolute():
         configured_data_dir = PROJECT_ROOT / configured_data_dir
     data_dir = configured_data_dir.resolve()
-    cloud_parts = {"onedrive", "onedriveconsumer", "onedrivecommercial"}
-    if any(
-        part.casefold() in cloud_parts or part.casefold().startswith("onedrive -")
-        for part in data_dir.parts
-    ):
+    if _contains_cloud_directory(configured_value) or _contains_cloud_directory(data_dir):
         raise ValueError("WXA_HUB_DATA_DIR ne peut pas etre place dans OneDrive.")
     host = env.get("WXA_HUB_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(env.get("WXA_HUB_PORT", str(DEFAULT_HUB_PORT)))
