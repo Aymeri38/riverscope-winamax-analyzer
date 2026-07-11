@@ -602,6 +602,65 @@ def test_join_api_never_returns_secret_or_url_and_is_no_store(db) -> None:
     assert store.load().access_token == "ONE_TIME_DEVICE_TOKEN_CANARY"
 
 
+def test_contributor_profile_local_proxy_uses_scoped_path_and_preserves_404(db) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("/missing/profile"):
+            return httpx.Response(404)
+        assert request.url.path == "/v1/contributors/alice-public/profile"
+        return httpx.Response(
+            200,
+            json={
+                "contributor": {
+                    "public_id": "alice-public",
+                    "display_name": "Alice",
+                    "joined_at": "2026-07-11T00:00:00Z",
+                },
+                "summary": {"games": 2},
+                "by_currency": [],
+                "by_limit": [],
+                "by_multiplier": [],
+                "trend": [],
+                "recent_tournaments": [],
+            },
+        )
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="1",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+        ),
+    )
+    original = app.state.community_client
+    app.state.community_client = community
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/community/contributors/alice-public/profile"
+            )
+            missing = client.get("/api/community/contributors/missing/profile")
+    finally:
+        app.state.community_client = original
+
+    assert response.status_code == 200
+    assert response.json()["contributor"]["public_id"] == "alice-public"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Contributeur introuvable."
+    assert seen == [
+        "/v1/contributors/alice-public/profile",
+        "/v1/contributors/missing/profile",
+    ]
+
+
 def test_every_community_route_is_blocked_by_active_file_guard(db, tmp_path) -> None:
     active = tmp_path / "active-Expresso.txt"
     active.write_text("Winamax Poker - active", encoding="utf-8")

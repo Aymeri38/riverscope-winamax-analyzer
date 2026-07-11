@@ -1,6 +1,6 @@
 # Winamax Expresso Analyzer
 
-Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur un serveur contrôlé par l’hôte — PC ou VPS — et de filtrer les résultats par contributeur.
+Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur un serveur contrôlé par l’hôte — PC ou VPS — et de consulter une fiche statistique globale par contributeur consentant.
 
 Projet indépendant, non affilié à Winamax.
 
@@ -77,7 +77,7 @@ L’import est idempotent grâce à SHA-256, l’identifiant externe du tournoi,
 - **Replayer** : ouverture manuelle uniquement, table, stacks, board, pot et actions pas à pas.
 - **Sessions** : regroupement après 30 minutes d’inactivité par défaut.
 - **Leaks** : règles explicables, seuil, échantillon, sévérité, confiance et recommandation générale.
-- **Communauté** : appairage explicite, synchronisation obligatoire des parties terminées, indicateurs communs, filtre par contributeur, liste de mains et replayer partagé en lecture seule.
+- **Communauté** : appairage explicite, synchronisation obligatoire des parties terminées, indicateurs communs, fiche globale par contributeur consentant, listes filtrées de parties et mains, et replayer partagé en lecture seule.
 - **Paramètres** : source, sécurité, sauvegarde, export et options locales.
 
 ## Formules
@@ -149,7 +149,11 @@ La liste blanche contient les dates de début/fin, buy-in, multiplicateur, prize
 - notes, tags, tickets, diagnostics et textes libres ;
 - paramètres, sauvegardes, cookies, mots de passe et clés API.
 
-Le contributeur est identifié uniquement par le nom d’affichage choisi lors de l’appairage. Le héros devient `HERO`; les adversaires deviennent `OPPONENT_1`, `OPPONENT_2`, etc., avec une correspondance limitée au tournoi. La version actuelle permet donc des statistiques globales et un suivi des **contributeurs consentants**, mais ne construit pas de profil global stable des adversaires.
+Le contributeur est identifié uniquement par le nom d’affichage choisi lors de l’appairage. Le héros devient `HERO`; les adversaires deviennent `OPPONENT_1`, `OPPONENT_2`, etc., avec une correspondance limitée au tournoi.
+
+Chaque membre actif dispose d’une fiche globale rattachée à son UUID de consentement. Elle consolide ses volumes, résultats, ROI, places, ITM, moyennes, chipEV disponible, évolution quotidienne, limites, multiplicateurs et tournois récents. Un réappairage ciblé sur un nouveau PC conserve la même fiche. La révocation masque immédiatement le membre et sa fiche de toutes les vues collectives.
+
+Cette fiche ne contient aucune structure de main, aucun replayer, aucun pseudo Winamax et aucun alias adverse. Les alias `OPPONENT_n` sont recréés indépendamment dans chaque tournoi et ne possèdent ni identifiant global, ni empreinte, ni table de correspondance. Le suivi persistant concerne donc exclusivement les **contributeurs consentants**.
 
 L’objectif à terme est que l’hôte puisse utiliser ce corpus de parties terminées et consenties pour améliorer la compatibilité du parser, les statistiques agrégées et le suivi global des membres. La version actuelle ne lance toutefois aucun entraînement, aucune analyse cloud et aucune republication automatique : elle collecte, stocke et expose les données au groupe privé uniquement.
 
@@ -246,7 +250,6 @@ La validation locale courante compte **115 tests réussis sous Windows et 3 test
 - Les recommandations sont pédagogiques et générales; elles ne remplacent pas une analyse de range contextualisée.
 - Le hub SQLite vise un groupe privé de taille modérée. Certificat, nom DNS éventuel, pare-feu, sauvegarde de la base et disponibilité du serveur hôte restent à administrer manuellement. Un VPS implique également les conditions de stockage et de sauvegarde de son hébergeur.
 - Le hub devient volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent leur file locale jusqu’au prochain lancement manuel autorisé.
-- Les adversaires n’ont aucun identifiant persistant entre tournois. Le suivi global porte uniquement sur les contributeurs qui ont rejoint le hub et consenti à l’envoi.
 - La détection de `Winamax.exe` est sondée toutes les 250 ms. Une requête post-session déjà en vol peut finir pendant cette très courte fenêtre; son payload a déjà été limité à des tournois confirmés terminés et aucune donnée de la nouvelle partie n’est lue.
 - L’API du hub expose le détail d’un tournoi, mais l’interface communautaire actuelle reste une vue en lecture seule composée des tableaux Parties/Mains et du replayer. Elle n’affiche pas encore une page de détail communautaire équivalente à la page locale.
 - Les classifications, profondeurs calculées et annotations restent locales et ne sont pas partagées. Le replayer communautaire anime les actions, le pot et les rues, mais conserve des stacks statiques faute de champ `stack_after` et ne rend pas encore les cartes adverses révélées autour de la table.

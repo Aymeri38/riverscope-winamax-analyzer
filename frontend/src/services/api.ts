@@ -4,6 +4,7 @@ import type {
   AppSettings,
   BreakdownRow,
   CommunityContributor,
+  CommunityContributorProfile,
   CommunityDashboard,
   CommunityHand,
   CommunityJoinInput,
@@ -562,6 +563,112 @@ function normalizeCommunityHand(raw: JsonRecord): CommunityHand {
   };
 }
 
+function normalizeCommunityProfileBreakdown(
+  raw: JsonRecord,
+  kind: "currency" | "limit" | "multiplier",
+  index: number
+): CommunityContributorProfile["by_limit"][number] {
+  const currency = string(raw.currency, "EUR").toUpperCase();
+  const rawValue = kind === "limit"
+    ? raw.buyin ?? raw.buy_in ?? raw.total_buyin
+    : kind === "multiplier" ? raw.multiplier : currency;
+  const fallbackLabel = rawValue === undefined || rawValue === null
+    ? `${kind === "limit" ? "Limite" : "Multiplicateur"} ${index + 1}`
+    : kind === "currency"
+      ? currency
+      : kind === "limit" ? `${number(rawValue)} ${currency}` : `×${number(rawValue)} · ${currency}`;
+  return {
+    label: string(raw.label, fallbackLabel),
+    currency,
+    buyin: nullableNumber(raw.buyin ?? raw.buy_in ?? raw.total_buyin),
+    multiplier: nullableNumber(raw.multiplier),
+    games: number(raw.games ?? raw.tournaments_count ?? raw.tournaments),
+    hands: number(raw.hands ?? raw.hands_count),
+    total_buyins: number(raw.total_buyins ?? raw.total_buy_ins ?? raw.total_buyin),
+    total_winnings: number(raw.total_winnings ?? raw.winnings ?? raw.total_reward),
+    net_result: number(raw.net_result ?? raw.net),
+    roi_percent: number(raw.roi_percent ?? raw.roi),
+    wins: number(raw.wins ?? raw.first_places),
+    win_rate_percent: number(raw.win_rate_percent ?? raw.win_rate),
+    itm_count: number(raw.itm_count),
+    itm_percent: number(raw.itm_percent ?? raw.itm),
+    average_net: number(raw.average_net ?? raw.average_gain),
+    chip_ev_per_game: nullableNumber(raw.chip_ev_per_game ?? raw.chipev_per_game),
+    chip_ev_games: number(raw.chip_ev_games ?? raw.chipev_games),
+    chip_ev_coverage_percent: number(raw.chip_ev_coverage_percent ?? raw.chipev_coverage)
+  };
+}
+
+function normalizeCommunityContributorProfile(raw: unknown): CommunityContributorProfile {
+  const payload = communityRecord(raw);
+  const contributor = payload.contributor && typeof payload.contributor === "object"
+    ? payload.contributor as JsonRecord
+    : {};
+  const summary = payload.summary && typeof payload.summary === "object"
+    ? payload.summary as JsonRecord
+    : {};
+  const publicId = string(contributor.public_id ?? contributor.id);
+  const displayName = string(contributor.display_name ?? contributor.name, "Contributeur");
+  const byCurrency = Array.isArray(payload.by_currency) ? payload.by_currency as JsonRecord[] : [];
+  const byLimit = Array.isArray(payload.by_limit) ? payload.by_limit as JsonRecord[] : [];
+  const byMultiplier = Array.isArray(payload.by_multiplier) ? payload.by_multiplier as JsonRecord[] : [];
+  const trend = Array.isArray(payload.trend) ? payload.trend as JsonRecord[] : [];
+  const recent = Array.isArray(payload.recent_tournaments)
+    ? payload.recent_tournaments as JsonRecord[]
+    : [];
+  return {
+    contributor: {
+      public_id: publicId,
+      display_name: displayName,
+      joined_at: string(contributor.joined_at) || null
+    },
+    summary: {
+      games: number(summary.games ?? summary.tournaments_count),
+      hands: number(summary.hands ?? summary.hands_count),
+      currency: string(summary.currency).toUpperCase() || null,
+      total_buyins: nullableNumber(summary.total_buyins ?? summary.total_buy_ins),
+      total_winnings: nullableNumber(summary.total_winnings ?? summary.winnings),
+      net_result: nullableNumber(summary.net_result ?? summary.net),
+      roi_percent: nullableNumber(summary.roi_percent ?? summary.roi),
+      wins: number(summary.wins ?? summary.first_places),
+      second_places: number(summary.second_places),
+      third_places: number(summary.third_places),
+      win_rate_percent: number(summary.win_rate_percent ?? summary.win_rate),
+      second_place_percent: number(summary.second_place_percent ?? summary.second_place_rate),
+      third_place_percent: number(summary.third_place_percent ?? summary.third_place_rate),
+      itm_count: number(summary.itm_count),
+      itm_percent: number(summary.itm_percent ?? summary.itm),
+      average_buyin: nullableNumber(summary.average_buyin ?? summary.average_buy_in),
+      average_winnings: nullableNumber(summary.average_winnings),
+      average_net: nullableNumber(summary.average_net ?? summary.average_gain),
+      average_duration_seconds: number(summary.average_duration_seconds),
+      average_hands: number(summary.average_hands),
+      chip_ev_per_game: nullableNumber(summary.chip_ev_per_game ?? summary.chipev_per_game),
+      chip_ev_games: number(summary.chip_ev_games ?? summary.chipev_games),
+      chip_ev_coverage_percent: number(summary.chip_ev_coverage_percent ?? summary.chipev_coverage),
+      first_game_at: string(summary.first_game_at) || null,
+      last_game_at: string(summary.last_game_at) || null
+    },
+    by_currency: byCurrency.map((row, index) => normalizeCommunityProfileBreakdown(row, "currency", index)),
+    by_limit: byLimit.map((row, index) => normalizeCommunityProfileBreakdown(row, "limit", index)),
+    by_multiplier: byMultiplier.map((row, index) => normalizeCommunityProfileBreakdown(row, "multiplier", index)),
+    trend: trend.map((row) => ({
+      date: string(row.date ?? row.label),
+      currency: string(row.currency, "EUR").toUpperCase(),
+      games: number(row.games),
+      total_buyins: number(row.total_buyins ?? row.total_buy_ins),
+      total_winnings: number(row.total_winnings),
+      net_result: number(row.net_result ?? row.net),
+      cumulative_net: number(row.cumulative_net ?? row.cumulative)
+    })),
+    recent_tournaments: recent.map((row) => ({
+      ...normalizeCommunityTournament(row),
+      contributor_id: string(row.contributor_id, publicId),
+      contributor_display_name: string(row.contributor_display_name, displayName)
+    }))
+  };
+}
+
 function pagination(filters?: ListFilters, fallback = 25): { page: number; pageSize: number; offset: number } {
   const page = Math.max(1, number(filters?.page, 1));
   const pageSize = Math.max(1, number(filters?.page_size, fallback));
@@ -657,6 +764,10 @@ export const api = {
   communitySync: () => request<ActionResult>("/community/sync", { method: "POST" }),
   communityContributors: async () =>
     communityItems(await request<unknown>("/community/contributors")).map(normalizeCommunityContributor),
+  communityContributorProfile: async (publicId: string) =>
+    normalizeCommunityContributorProfile(
+      await request<unknown>(`/community/contributors/${encodeURIComponent(publicId)}/profile`)
+    ),
   communityDashboard: async (filters?: ListFilters): Promise<CommunityDashboard> => {
     const raw = communityRecord(await request<unknown>(`/community/dashboard${queryString({ contributor_id: filters?.contributor_id })}`));
     const summary = raw.summary && typeof raw.summary === "object" ? raw.summary as JsonRecord : raw;

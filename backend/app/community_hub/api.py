@@ -16,6 +16,7 @@ from app.community_hub.middleware import BodySizeLimitMiddleware, NoStoreMiddlew
 from app.community_hub.models import Device, Member, SharedHand, SharedTournament
 from app.community_hub.rate_limit import HubRateLimitMiddleware, InMemoryRateLimiter
 from app.community_hub.schemas import (
+    ContributorProfileResponse,
     EnrollRequest,
     EnrollResponse,
     SyncTournamentRequest,
@@ -31,6 +32,7 @@ from app.community_hub.security import (
 from app.community_hub.service import (
     HAND_WITH_RELATIONS,
     TOURNAMENT_WITH_RELATIONS,
+    contributor_profile,
     contributor_id_to_internal,
     dashboard,
     enroll,
@@ -202,6 +204,21 @@ def create_hub_app(
                 for member, tournament_count, hand_count in rows
             ]
         }
+
+    @secure.get(
+        "/contributors/{public_id}/profile",
+        response_model=ContributorProfileResponse,
+        dependencies=[Depends(require_contribution)],
+    )
+    def contributor_profile_route(
+        public_id: str,
+        db: Session = Depends(get_hub_db),
+    ) -> ContributorProfileResponse:
+        # The response model is an output allowlist: an accidental player,
+        # action, replay, or opponent field makes response validation fail.
+        return ContributorProfileResponse.model_validate(
+            contributor_profile(db, public_id)
+        )
 
     @secure.get("/tournaments", dependencies=[Depends(require_contribution)])
     def tournaments(

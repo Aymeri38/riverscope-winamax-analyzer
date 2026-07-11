@@ -83,6 +83,10 @@ class CommunityOfflineError(CommunityError):
     code = "hub_offline"
 
 
+class CommunityResourceNotFoundError(CommunityError):
+    code = "resource_not_found"
+
+
 class CommunityRemoteError(CommunityError):
     code = "hub_rejected"
 
@@ -871,6 +875,9 @@ class CommunityClient:
                 self._record_connection_result(db, config_value, error="hub_offline")
                 raise CommunityOfflineError() from exc
             if response_status != 200:
+                if response_status == 404:
+                    self._record_connection_result(db, config_value, error=None)
+                    raise CommunityResourceNotFoundError()
                 code = f"proxy_http_{response_status}"
                 self._record_connection_result(db, config_value, error=code)
                 raise CommunityRemoteError(code)

@@ -332,6 +332,79 @@ export interface CommunityDashboard {
   win_rate: number;
 }
 
+export interface CommunityProfileSummary {
+  games: number;
+  hands: number;
+  currency: string | null;
+  total_buyins: number | null;
+  total_winnings: number | null;
+  net_result: number | null;
+  roi_percent: number | null;
+  wins: number;
+  second_places: number;
+  third_places: number;
+  win_rate_percent: number;
+  second_place_percent: number;
+  third_place_percent: number;
+  itm_count: number;
+  itm_percent: number;
+  average_buyin: number | null;
+  average_winnings: number | null;
+  average_net: number | null;
+  average_duration_seconds: number;
+  average_hands: number;
+  chip_ev_per_game: number | null;
+  chip_ev_games: number;
+  chip_ev_coverage_percent: number;
+  first_game_at: string | null;
+  last_game_at: string | null;
+}
+
+export interface CommunityProfileBreakdown {
+  label: string;
+  currency: string;
+  buyin: number | null;
+  multiplier: number | null;
+  games: number;
+  hands: number;
+  total_buyins: number;
+  total_winnings: number;
+  net_result: number;
+  roi_percent: number;
+  wins: number;
+  win_rate_percent: number;
+  itm_count: number;
+  itm_percent: number;
+  average_net: number;
+  chip_ev_per_game: number | null;
+  chip_ev_games: number;
+  chip_ev_coverage_percent: number;
+}
+
+export interface CommunityProfileTrendPoint {
+  date: string;
+  currency: string;
+  games: number;
+  total_buyins: number;
+  total_winnings: number;
+  net_result: number;
+  cumulative_net: number;
+}
+
+export interface CommunityContributorProfile {
+  contributor: {
+    public_id: string;
+    display_name: string;
+    joined_at: string | null;
+  };
+  summary: CommunityProfileSummary;
+  by_currency: CommunityProfileBreakdown[];
+  by_limit: CommunityProfileBreakdown[];
+  by_multiplier: CommunityProfileBreakdown[];
+  trend: CommunityProfileTrendPoint[];
+  recent_tournaments: CommunityTournament[];
+}
+
 export interface CommunityTournament extends Tournament {
   contributor_id: string;
   contributor_display_name: string;

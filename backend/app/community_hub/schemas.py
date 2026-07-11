@@ -192,5 +192,98 @@ class SyncTournamentResponse(StrictModel):
     hand_count: int
 
 
+class ContributorProfileIdentity(StrictModel):
+    public_id: str
+    display_name: str
+    joined_at: datetime
+
+
+class ContributorProfileSummary(StrictModel):
+    games: int
+    hands: int
+    currency: str | None
+    total_buyins: float | None
+    total_winnings: float | None
+    net_result: float | None
+    roi_percent: float | None
+    wins: int
+    second_places: int
+    third_places: int
+    win_rate_percent: float
+    second_place_percent: float
+    third_place_percent: float
+    itm_count: int
+    itm_percent: float
+    average_buyin: float | None
+    average_winnings: float | None
+    average_net: float | None
+    average_duration_seconds: float
+    average_hands: float
+    chip_ev_per_game: float | None
+    chip_ev_games: int
+    chip_ev_coverage_percent: float
+    first_game_at: datetime
+    last_game_at: datetime
+
+
+class ContributorProfileBreakdown(StrictModel):
+    currency: str
+    buyin: float | None = None
+    multiplier: float | None = None
+    games: int
+    hands: int
+    total_buyins: float
+    total_winnings: float
+    net_result: float
+    roi_percent: float
+    wins: int
+    win_rate_percent: float
+    itm_count: int
+    itm_percent: float
+    average_net: float
+    chip_ev_per_game: float | None
+    chip_ev_games: int
+    chip_ev_coverage_percent: float
+
+
+class ContributorProfileTrendDay(StrictModel):
+    date: str
+    currency: str
+    games: int
+    total_buyins: float
+    total_winnings: float
+    net_result: float
+    cumulative_net: float
+
+
+class ContributorProfileTournament(StrictModel):
+    public_id: str
+    started_at: datetime
+    ended_at: datetime
+    format: str
+    is_nitro: bool
+    currency: str
+    total_buyin: float
+    multiplier: float | None
+    prize_pool: float
+    reward: float
+    net_result: float
+    final_rank: int
+    duration_seconds: int
+    total_hands: int
+    registered_players: int
+    chip_delta: int | None
+
+
+class ContributorProfileResponse(StrictModel):
+    contributor: ContributorProfileIdentity
+    summary: ContributorProfileSummary
+    by_currency: list[ContributorProfileBreakdown]
+    by_limit: list[ContributorProfileBreakdown]
+    by_multiplier: list[ContributorProfileBreakdown]
+    trend: list[ContributorProfileTrendDay]
+    recent_tournaments: list[ContributorProfileTournament] = Field(max_length=10)
+
+
 def is_opponent_alias(value: str) -> bool:
     return bool(re.fullmatch(r"OPPONENT_[1-9][0-9]*", value))

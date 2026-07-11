@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import json
 from pathlib import Path
 import time
 
@@ -239,6 +240,24 @@ def enroll_friend(hub, name: str = "Alice") -> dict:
     return response.json()
 
 
+def enroll_additional_friend(hub, name: str) -> dict:
+    db = hub["database"].session()
+    _invite, invite_token = create_invite(db, expires_hours=24)
+    db.close()
+    response = hub["client"].post(
+        "/v1/enroll",
+        json={
+            "invite_token": invite_token,
+            "display_name": name,
+            "device_label": f"PC {name}",
+            "policy_version": "1",
+            "consent": True,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def test_hub_uses_separate_database_and_expected_tables(hub):
     assert hub["database"].database_path.name == "community_hub.db"
     assert set(HubBase.metadata.tables) == {
@@ -376,6 +395,12 @@ def test_consultation_requires_a_contribution(hub):
     )
     assert response.status_code == 403
     assert "Synchronisez" in response.json()["detail"]
+    profile = hub["client"].get(
+        f"/v1/contributors/{enrolled['member_id']}/profile",
+        headers=auth(enrolled["device_token"]),
+    )
+    assert profile.status_code == 403
+    assert "Synchronisez" in profile.json()["detail"]
     assert hub["client"].post(
         "/v1/sync/tournaments",
         json=tournament_payload(),
@@ -500,6 +525,192 @@ def test_filter_dashboard_and_replay_contract(hub):
     assert dashboard["tournaments"] == 1
     assert dashboard["hands"] == 1
     assert dashboard["net_result"] == 4.0
+
+
+def test_contributor_profile_is_complete_private_and_member_isolated(hub):
+    alice = enroll_friend(hub)
+    alice_headers = auth(alice["device_token"])
+    first = tournament_payload("1" * 64)
+    assert hub["client"].post(
+        "/v1/sync/tournaments", json=first, headers=alice_headers
+    ).status_code == 201
+
+    second = tournament_payload("2" * 64)
+    second_started = datetime(2025, 1, 3, 19, 0, tzinfo=UTC)
+    second["tournament"].update(
+        {
+            "started_at": second_started.isoformat(),
+            "ended_at": (second_started + timedelta(minutes=5)).isoformat(),
+            "total_buyin": 5.0,
+            "multiplier": 2.0,
+            "prize_pool": 10.0,
+            "reward": 0.0,
+            "final_rank": 3,
+            "duration_seconds": 300,
+            "chip_delta": None,
+        }
+    )
+    second["tournament"]["hands"][0]["played_at"] = (
+        second_started + timedelta(minutes=1)
+    ).isoformat()
+    assert hub["client"].post(
+        "/v1/sync/tournaments", json=second, headers=alice_headers
+    ).status_code == 201
+
+    bob = enroll_additional_friend(hub, "Bob")
+    bob_payload = tournament_payload("3" * 64)
+    bob_payload["tournament"].update(
+        {
+            "total_buyin": 100.0,
+            "prize_pool": 300.0,
+            "reward": 300.0,
+        }
+    )
+    bob_headers = auth(bob["device_token"])
+    assert hub["client"].post(
+        "/v1/sync/tournaments", json=bob_payload, headers=bob_headers
+    ).status_code == 201
+
+    response = hub["client"].get(
+        f"/v1/contributors/{alice['member_id']}/profile", headers=bob_headers
+    )
+    assert response.status_code == 200, response.text
+    profile = response.json()
+    assert profile["contributor"]["public_id"] == alice["member_id"]
+    assert profile["contributor"]["display_name"] == "Alice"
+    assert profile["summary"] == {
+        "games": 2,
+        "hands": 2,
+        "currency": "EUR",
+        "total_buyins": 7.0,
+        "total_winnings": 6.0,
+        "net_result": -1.0,
+        "roi_percent": pytest.approx(-100 / 7),
+        "wins": 1,
+        "second_places": 0,
+        "third_places": 1,
+        "win_rate_percent": 50.0,
+        "second_place_percent": 0.0,
+        "third_place_percent": 50.0,
+        "itm_count": 1,
+        "itm_percent": 50.0,
+        "average_buyin": 3.5,
+        "average_winnings": 3.0,
+        "average_net": -0.5,
+        "average_duration_seconds": 450.0,
+        "average_hands": 1.0,
+        "chip_ev_per_game": 1000.0,
+        "chip_ev_games": 1,
+        "chip_ev_coverage_percent": 50.0,
+        "first_game_at": "2025-01-02T19:00:00Z",
+        "last_game_at": "2025-01-03T19:00:00Z",
+    }
+    assert [(row["buyin"], row["games"]) for row in profile["by_limit"]] == [
+        (2.0, 1),
+        (5.0, 1),
+    ]
+    assert [row["multiplier"] for row in profile["by_multiplier"]] == [2.0, 3.0]
+    assert [row["net_result"] for row in profile["trend"]] == [4.0, -5.0]
+    assert [row["cumulative_net"] for row in profile["trend"]] == [4.0, -1.0]
+    assert [row["total_buyin"] for row in profile["recent_tournaments"]] == [5.0, 2.0]
+
+    serialized = json.dumps(profile)
+    assert bob["member_id"] not in serialized
+    assert "Bob" not in serialized
+    assert "OPPONENT_" not in serialized
+
+    def keys(value):
+        if isinstance(value, dict):
+            return set(value) | set().union(*(keys(item) for item in value.values()))
+        if isinstance(value, list):
+            return set().union(*(keys(item) for item in value), set())
+        return set()
+
+    assert keys(profile).isdisjoint(
+        {
+            "alias",
+            "players",
+            "player_id",
+            "opponent",
+            "opponents",
+            "replay",
+            "actions",
+            "hero_cards",
+            "board",
+        }
+    )
+
+    unknown = hub["client"].get(
+        "/v1/contributors/does-not-exist/profile", headers=bob_headers
+    )
+    assert unknown.status_code == 404
+    # An enrolled account without a contribution is not publicly discoverable.
+    not_yet_contributor = hub["client"].get(
+        f"/v1/contributors/{hub['owner'].public_id}/profile", headers=bob_headers
+    )
+    assert not_yet_contributor.status_code == 404
+
+
+def test_contributor_profile_recent_tournaments_is_capped_at_ten(hub):
+    enrolled = enroll_friend(hub)
+    headers = auth(enrolled["device_token"])
+    base = datetime(2025, 2, 1, 19, 0, tzinfo=UTC)
+    for index in range(11):
+        payload = tournament_payload(f"{index + 1:064x}")
+        started = base + timedelta(days=index)
+        payload["tournament"]["started_at"] = started.isoformat()
+        payload["tournament"]["ended_at"] = (started + timedelta(minutes=10)).isoformat()
+        payload["tournament"]["hands"][0]["played_at"] = (
+            started + timedelta(minutes=1)
+        ).isoformat()
+        assert hub["client"].post(
+            "/v1/sync/tournaments", json=payload, headers=headers
+        ).status_code == 201
+
+    profile = hub["client"].get(
+        f"/v1/contributors/{enrolled['member_id']}/profile", headers=headers
+    )
+    assert profile.status_code == 200, profile.text
+    recent = profile.json()["recent_tournaments"]
+    assert len(recent) == 10
+    assert recent[0]["started_at"] == "2025-02-11T19:00:00Z"
+    assert recent[-1]["started_at"] == "2025-02-02T19:00:00Z"
+
+
+def test_contributor_profile_never_adds_different_currencies(hub):
+    enrolled = enroll_friend(hub)
+    headers = auth(enrolled["device_token"])
+    eur = tournament_payload("4" * 64)
+    usd = tournament_payload("5" * 64)
+    usd["tournament"]["currency"] = "USD"
+    for payload in (eur, usd):
+        assert hub["client"].post(
+            "/v1/sync/tournaments", json=payload, headers=headers
+        ).status_code == 201
+
+    response = hub["client"].get(
+        f"/v1/contributors/{enrolled['member_id']}/profile", headers=headers
+    )
+    assert response.status_code == 200, response.text
+    profile = response.json()
+    assert profile["summary"]["games"] == 2
+    assert profile["summary"]["currency"] is None
+    for field in (
+        "total_buyins",
+        "total_winnings",
+        "net_result",
+        "roi_percent",
+        "average_buyin",
+        "average_winnings",
+        "average_net",
+    ):
+        assert profile["summary"][field] is None
+    assert [row["currency"] for row in profile["by_currency"]] == ["EUR", "USD"]
+    assert [row["net_result"] for row in profile["by_currency"]] == [4.0, 4.0]
+    assert [(row["currency"], row["cumulative_net"]) for row in profile["trend"]] == [
+        ("EUR", 4.0),
+        ("USD", 4.0),
+    ]
 
 
 def test_real_local_serializer_matches_hub_contract(db, hub):

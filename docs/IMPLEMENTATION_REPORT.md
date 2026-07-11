@@ -108,7 +108,7 @@ Capacités livrées :
 - synchronisation idempotente par clé HMAC, complétée par un digest de contenu indépendant de l’appareil pour éviter les doublons lors d’un ré-enrôlement, sans identifiant Winamax brut ;
 - liste blanche stricte et rejet des champs supplémentaires ;
 - pseudonyme de contributeur choisi à l’inscription, héros `HERO` et adversaires `OPPONENT_n` réinitialisés par tournoi ;
-- tableau de bord, contributeurs, tournois, mains et replayer partagé filtrables ;
+- tableau de bord, fiche globale par contributeur consentant, tournois, mains et replayer partagé filtrables ;
 - consultation refusée avant une première contribution et tant que le client officiel possède une file locale en attente ;
 - `Cache-Control: no-store`, absence de CORS, `TrustedHost`, taille de corps limitée et pagination ;
 - quotas persistants par membre et limites de débit en mémoire pour enrôlement, synchronisation et autres routes ;
@@ -117,7 +117,9 @@ Capacités livrées :
 
 Les données persistantes communes résident uniquement dans le répertoire configuré du serveur hôte. Les historiques sources et la file technique restent nécessairement sur les PC contributeurs ; les réponses consultées ne sont pas importées dans leur SQLite. Le hub n’envoie aucune donnée à un second service applicatif. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots relèvent cependant de l’hébergeur et doivent être inclus dans le consentement du groupe.
 
-Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle ne crée aucun profil adverse global persistant et reste entièrement post-session.
+Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle reste entièrement post-session.
+
+Le suivi global est rattaché au seul UUID d’un membre consentant. Sa fiche agrège exclusivement ses tournois et expose volumes, résultats, places, moyennes, chipEV couvert, courbe quotidienne, limites, multiplicateurs et dix tournois récents. Elle ne renvoie aucune main, action, carte, structure de replayer, empreinte de pseudo ou identité adverse. Les alias adverses restent propres à un tournoi et ne peuvent pas être joints entre deux contributions. Un membre désactivé disparaît de la route de profil et de toutes les agrégations collectives.
 
 La pseudonymisation ne promet pas l’anonymat : chronologie exacte, cartes, actions, montants et résultats restent corrélables. Le modèle de menace fait confiance au compte système du serveur hôte et à ses processus. Enfin, un serveur ne peut pas attester qu’un fork open source n’a pas retiré ses propres gardes ou falsifié les dates envoyées. L’hôte doit donc protéger la base hors synchronisation ou partage réseau, inviter uniquement des membres de confiance et administrer révocations, quotas et sauvegardes.
 
@@ -215,9 +217,8 @@ Les identifiants de membres, jetons d’invitation, secrets de périphériques, 
 10. Le hub est mono-instance SQLite et vise un groupe privé de taille modérée; ce n’est pas une plateforme Internet multi-région.
 11. L’hôte doit administrer certificat, DNS éventuel, pare-feu, sauvegardes et disponibilité du serveur. Le déploiement sans privilèges expose directement un port TLS non privilégié ; une terminaison TLS publique sur 443 et un service système durci nécessitent une intervention `sudo` distincte.
 12. Le hub est volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent alors leur file locale jusqu’à un redémarrage manuel autorisé.
-13. Les alias adverses sont propres à chaque tournoi : les données permettent le suivi global des contributeurs consentants, pas le profilage persistant des adversaires.
-14. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit tableaux filtrés et replayer en lecture seule. Les classifications/profondeurs analytiques restent locales, les stacks du replayer partagé sont statiques et les cartes adverses révélées ne sont pas encore rendues autour de la table.
-15. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.
+13. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit fiche contributeur, tableaux filtrés et replayer en lecture seule. Les classifications/profondeurs analytiques restent locales, les stacks du replayer partagé sont statiques et les cartes adverses révélées ne sont pas encore rendues autour de la table.
+14. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.
 
 ## Démarrage
 

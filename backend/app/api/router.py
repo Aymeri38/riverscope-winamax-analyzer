@@ -51,6 +51,7 @@ from app.services.community_client import (
     CommunityNotConfiguredError,
     CommunityOfflineError,
     CommunityPendingError,
+    CommunityResourceNotFoundError,
     CommunityRemoteError,
     ensure_community_post_session,
     sync_community_after_rescan,
@@ -638,6 +639,9 @@ def _raise_community_http(exc: Exception) -> None:
     elif isinstance(exc, CommunityContributionRequiredError):
         code = status.HTTP_409_CONFLICT
         detail = "Synchronisez au moins un tournoi terminé avant consultation."
+    elif isinstance(exc, CommunityResourceNotFoundError):
+        code = status.HTTP_404_NOT_FOUND
+        detail = "Contributeur introuvable."
     elif isinstance(exc, CommunityActivityError):
         code = status.HTTP_423_LOCKED
         detail = "Mode communautaire bloqué pendant une activité potentielle."
@@ -750,6 +754,19 @@ def _validated_public_id(value: str) -> str:
 @router.get("/community/contributors")
 def community_contributors(request: Request, db: Session = Depends(get_db)) -> Any:
     return _community_proxy(request, db, "/v1/contributors")
+
+
+@router.get("/community/contributors/{public_id}/profile")
+def community_contributor_profile(
+    public_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        f"/v1/contributors/{_validated_public_id(public_id)}/profile",
+    )
 
 
 @router.get("/community/dashboard")

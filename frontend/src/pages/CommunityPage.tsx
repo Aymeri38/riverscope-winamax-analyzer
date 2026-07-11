@@ -14,6 +14,7 @@ import {
   Users
 } from "lucide-react";
 import { HandReplayer } from "../components/HandReplayer";
+import { CommunityContributorProfileView } from "../components/CommunityContributorProfile";
 import { EmptyState, ErrorState, LoadingState, MetricCard, PageHeader, Pagination, SectionCard, StatusPill } from "../components/Ui";
 import { useSafety } from "../contexts/SafetyContext";
 import { useApi } from "../hooks/useApi";
@@ -103,6 +104,12 @@ export function CommunityPage() {
     () => configured ? api.communityDashboard({ contributor_id: contributorId }) : Promise.resolve(null),
     [configured, contributorId, dataRevision]
   );
+  const contributorProfile = useApi(
+    () => configured && contributorId
+      ? api.communityContributorProfile(contributorId)
+      : Promise.resolve(null),
+    [configured, contributorId, dataRevision]
+  );
   const tournaments = useApi(
     () => configured ? api.communityTournaments({ contributor_id: contributorId, page: tournamentsPage, page_size: 25 }) : Promise.resolve({ items: [], total: 0, page: 1, page_size: 25 }),
     [configured, contributorId, tournamentsPage, dataRevision]
@@ -119,6 +126,7 @@ export function CommunityPage() {
 
   function selectContributor(value: string) {
     setContributorId(value);
+    if (value) setView("overview");
     setTournamentsPage(1);
     setHandsPage(1);
   }
@@ -245,7 +253,17 @@ export function CommunityPage() {
       </nav>
 
       {view === "overview" && (
-        dashboard.loading ? <LoadingState /> : dashboard.error ? <ErrorState error={dashboard.error} retry={dashboard.reload} /> : dashboard.data ? (
+        contributorId ? (
+          contributorProfile.loading ? (
+            <LoadingState label="Construction de la fiche du contributeur…" />
+          ) : contributorProfile.error ? (
+            <ErrorState error={contributorProfile.error} retry={contributorProfile.reload} />
+          ) : contributorProfile.data ? (
+            <CommunityContributorProfileView profile={contributorProfile.data} />
+          ) : (
+            <EmptyState title="Profil indisponible" description="Aucune statistique consentie n’est disponible pour ce contributeur." />
+          )
+        ) : dashboard.loading ? <LoadingState /> : dashboard.error ? <ErrorState error={dashboard.error} retry={dashboard.reload} /> : dashboard.data ? (
           <div className="community-overview">
             <div className="metrics-grid community-metrics">
               <MetricCard label="Contributeurs" value={formatNumber(dashboard.data.contributors_count)} icon={<Users />} />
