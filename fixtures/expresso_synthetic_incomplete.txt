@@ -1,0 +1,13 @@
+Winamax Poker - Tournament "Expresso Synthetic" buyIn: 1.80 EUR + 0.20 EUR level: 1 - HandId: #7700000000000000001-1-1010101010 - Holdem no limit (5/10) - 2020/01/02 11:00:10 UTC
+Table: 'Expresso Synthetic(4242424242)#0' 3-max (real money) Seat #2 is the button
+Seat 1: VILLAIN_1 (200)
+Seat 2: HERO (200)
+Seat 3: VILLAIN_2 (200)
+*** ANTE/BLINDS ***
+VILLAIN_2 posts small blind 5
+VILLAIN_1 posts big blind 10
+Dealt to HERO [4d 7c]
+*** PRE-FLOP ***
+HERO folds
+VILLAIN_2 folds
+VILLAIN_1 collected 15 from pot

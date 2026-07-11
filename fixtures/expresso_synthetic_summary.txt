@@ -1,0 +1,14 @@
+Winamax Poker - Tournament summary : Expresso Synthetic(4242424242)
+Player : HERO
+Buy-In : 1.80 EUR + 0.20 EUR
+Registered players : 3
+Mode : sng
+Type : sitngo
+Speed : standard
+Flight ID : 0
+Levels : [5-10:0:60:holdem-no-limit,10-20:0:60:holdem-no-limit]
+Prizepool : 4 EUR
+Tournament started 2020/01/02 12:00:05 UTC
+You played 5min 0s
+You finished in 1st place
+You won 4 EUR

@@ -1,0 +1,40 @@
+# Runtime local et données privées
+.runtime/
+data/
+backend/data/
+backend/.test-data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+*.tsbuildinfo
+.playwright-cli/
+output/playwright/
+.public-release/
+.public-release.zip
+
+# IDE / OS / secrets
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Exports locaux
+exports/
