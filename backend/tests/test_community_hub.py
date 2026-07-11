@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import base64
 import json
 from pathlib import Path
+import threading
 import time
 
 import pytest
@@ -1851,12 +1852,12 @@ def test_runner_rejects_missing_opponent_keys_before_database_initialization(tmp
 
 
 def test_runtime_guard_requests_server_shutdown_without_restart(tmp_path):
-    probe_results = iter((False, False, False, False, False, True))
+    winamax_started = threading.Event()
     servers = []
     configs = []
 
     def detector() -> bool:
-        return next(probe_results, True)
+        return winamax_started.is_set()
 
     class FakeServer:
         def __init__(self, config) -> None:
@@ -1867,6 +1868,7 @@ def test_runtime_guard_requests_server_shutdown_without_restart(tmp_path):
 
         def run(self) -> None:
             self.run_count += 1
+            winamax_started.set()
             deadline = time.monotonic() + 2
             while not self.should_exit and time.monotonic() < deadline:
                 time.sleep(0.01)
