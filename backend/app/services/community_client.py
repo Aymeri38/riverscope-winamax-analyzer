@@ -25,16 +25,28 @@ from app.core.community_secret import (
     DpapiCommunitySecretStore,
 )
 from app.core.process_guard import analysis_interlock
-from app.models import CommunitySyncRecord, Hand, HandPlayer, Tournament, TournamentPlayer
+from app.models import (
+    CommunityOpponentSyncRecord,
+    CommunitySyncRecord,
+    Hand,
+    HandPlayer,
+    Tournament,
+    TournamentPlayer,
+)
 from app.schemas.community import (
     COMMUNITY_CONSENT_VERSION,
     COMMUNITY_SCHEMA_VERSION,
     CommunityActionPayload,
+    CommunityConsentRequest,
+    CommunityConsentResponse,
     CommunityEnrollmentResponse,
     CommunityHandPayload,
     CommunityJoinRequest,
     CommunityLocalConfig,
     CommunityMeResponse,
+    CommunityOpponentEntryPayload,
+    CommunityOpponentPayload,
+    CommunityOpponentSyncHubResponse,
     CommunityPlayerPayload,
     CommunityStatusResponse,
     CommunitySyncHubResponse,
@@ -77,6 +89,10 @@ class CommunityPendingError(CommunityError):
 
 class CommunityContributionRequiredError(CommunityError):
     code = "no_contribution"
+
+
+class CommunityConsentRequiredError(CommunityError):
+    code = "consent_upgrade_required"
 
 
 class CommunityOfflineError(CommunityError):
@@ -126,7 +142,7 @@ def ensure_community_post_session(db: Session) -> None:
     analysis_interlock.ensure_allowed()
 
 
-def _canonical_bytes(payload: CommunityTournamentPayload) -> bytes:
+def _canonical_bytes(payload: CommunityTournamentPayload | CommunityOpponentPayload) -> bytes:
     return json.dumps(
         payload.model_dump(mode="json", exclude_none=True),
         ensure_ascii=False,
@@ -323,6 +339,50 @@ def serialize_completed_tournament(
     )
 
 
+def serialize_tournament_opponents(tournament: Tournament) -> CommunityOpponentPayload:
+    """Serialize exact opponent names only for a fully completed tournament.
+
+    The caller must run the process and file guards immediately before this
+    function.  The returned model hides display names from ``repr`` and is
+    never logged by the client.
+    """
+    if not tournament.completed or tournament.ended_at is None or tournament.final_rank is None:
+        raise ValueError("Seuls les tournois termines sont enrichissables")
+    if not tournament.is_expresso:
+        raise ValueError("Seuls les tournois Expresso sont enrichissables")
+    aliases = _tournament_aliases(tournament)
+    tournament_entries = {entry.player_id: entry for entry in tournament.players}
+    players = {entry.player_id: entry.player for entry in tournament.players}
+    for hand in tournament.hands:
+        for entry in hand.player_entries:
+            players.setdefault(entry.player_id, entry.player)
+    values: list[CommunityOpponentEntryPayload] = []
+    for player_id, alias in sorted(aliases.items(), key=lambda item: item[1]):
+        if alias == "HERO":
+            continue
+        if alias not in {"OPPONENT_1", "OPPONENT_2"}:
+            raise ValueError("Un Expresso ne peut contenir que deux adversaires")
+        player = players.get(player_id)
+        if player is None or player.is_hero:
+            raise ValueError("Identite adverse locale incomplete")
+        entry = tournament_entries.get(player_id)
+        values.append(
+            CommunityOpponentEntryPayload(
+                alias=alias,
+                display_name=player.display_name,
+                final_rank=entry.final_rank if entry is not None else None,
+                reward=(
+                    float(entry.reward)
+                    if entry is not None and entry.final_rank is not None
+                    else None
+                ),
+                starting_stack=entry.starting_stack if entry is not None else None,
+                final_stack=entry.final_stack if entry is not None else None,
+            )
+        )
+    return CommunityOpponentPayload(opponents=values)
+
+
 def _completed_tournaments(
     db: Session,
     tournament_ids: list[int] | None = None,
@@ -510,9 +570,11 @@ class CommunityClient:
                 consent_version=request.consent_version,
                 enrolled_at=utcnow(),
                 last_contact_at=utcnow(),
+                opponent_tracking_required=request.consent_version == "2",
             )
             save_community_config(db, config_value)
             db.execute(delete(CommunitySyncRecord))
+            db.execute(delete(CommunityOpponentSyncRecord))
             db.commit()
             self.enqueue_completed(db, secrets_value=secrets_value)
             return self.status(db).model_dump(mode="json")
@@ -542,6 +604,7 @@ class CommunityClient:
                     remote_revoked = False
                 ensure_community_post_session(db)
             self.secret_store.delete()
+            db.execute(delete(CommunityOpponentSyncRecord))
             db.execute(delete(CommunitySyncRecord))
             delete_community_config(db)
             db.commit()
@@ -618,7 +681,137 @@ class CommunityClient:
         db.commit()
         return queued
 
-    def sync(self, db: Session) -> CommunitySyncResponse:
+    def enqueue_opponents(
+        self,
+        db: Session,
+        *,
+        revalidate_existing: bool = False,
+    ) -> int:
+        """Queue missing enrichments and optionally revalidate delivered ones.
+
+        Existing payloads are deliberately rehashed only after an explicit
+        manual rescan. Status polling and shared reads retain the cheap path.
+        """
+        ensure_community_post_session(db)
+        config_value = load_community_config(db)
+        if (
+            not config_value.enabled
+            or not config_value.opponent_tracking_required
+            or config_value.consent_version != "2"
+        ):
+            return 0
+        candidate_query = (
+            select(Tournament.id)
+            .join(
+                CommunitySyncRecord,
+                CommunitySyncRecord.tournament_id == Tournament.id,
+            )
+            .outerjoin(
+                CommunityOpponentSyncRecord,
+                CommunityOpponentSyncRecord.tournament_id == Tournament.id,
+            )
+            .where(
+                Tournament.completed.is_(True),
+                Tournament.is_expresso.is_(True),
+                Tournament.ended_at.is_not(None),
+                Tournament.final_rank.is_not(None),
+                CommunitySyncRecord.state == "synced",
+                CommunitySyncRecord.remote_public_id.is_not(None),
+            )
+        )
+        if not revalidate_existing:
+            candidate_query = candidate_query.where(
+                (CommunityOpponentSyncRecord.id.is_(None))
+                | (CommunityOpponentSyncRecord.schema_version != "1")
+            )
+        candidate_ids = list(db.scalars(candidate_query))
+        if not candidate_ids:
+            return 0
+        existing = {
+            record.tournament_id: record
+            for record in db.scalars(
+                select(CommunityOpponentSyncRecord).where(
+                    CommunityOpponentSyncRecord.tournament_id.in_(candidate_ids)
+                )
+            )
+        }
+        queued = 0
+        for tournament in _completed_tournaments(db, candidate_ids):
+            ensure_community_post_session(db)
+            payload = serialize_tournament_opponents(tournament)
+            digest = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+            record = existing.get(tournament.id)
+            if record is None:
+                db.add(
+                    CommunityOpponentSyncRecord(
+                        tournament_id=tournament.id,
+                        schema_version="1",
+                        payload_sha256=digest,
+                        state="pending",
+                    )
+                )
+                queued += 1
+            elif record.schema_version != "1" or record.payload_sha256 != digest:
+                record.schema_version = "1"
+                record.payload_sha256 = digest
+                record.state = "pending"
+                record.synced_at = None
+                record.last_error_code = None
+                queued += 1
+        ensure_community_post_session(db)
+        db.commit()
+        return queued
+
+    def upgrade_consent(
+        self,
+        db: Session,
+        request: CommunityConsentRequest,
+    ) -> CommunityConsentResponse:
+        ensure_community_post_session(db)
+        with self._lock:
+            config_value = load_community_config(db)
+            credentials = self.secret_store.load()
+            if not config_value.enabled or credentials is None:
+                raise CommunityNotConfiguredError()
+            try:
+                with self._http() as client:
+                    response_status, response_data = self._request_json(
+                        client,
+                        "POST",
+                        self._endpoint(config_value, "/v1/consent"),
+                        accepted_statuses={200},
+                        headers=self._auth_headers(credentials),
+                        json=request.model_dump(mode="json"),
+                    )
+            except httpx.RequestError as exc:
+                raise CommunityOfflineError() from exc
+            if response_status != 200:
+                raise CommunityRemoteError(f"consent_http_{response_status}")
+            try:
+                result = CommunityConsentResponse.model_validate(response_data)
+            except ValueError as exc:
+                raise CommunityRemoteError("invalid_consent_response") from exc
+            ensure_community_post_session(db)
+            save_community_config(
+                db,
+                config_value.model_copy(
+                    update={
+                        "consent_version": result.policy_version,
+                        "last_contact_at": utcnow(),
+                        "last_error_code": None,
+                        "opponent_tracking_required": True,
+                    }
+                ),
+            )
+            self.enqueue_opponents(db)
+            return result
+
+    def sync(
+        self,
+        db: Session,
+        *,
+        revalidate_opponents: bool = False,
+    ) -> CommunitySyncResponse:
         ensure_community_post_session(db)
         with self._lock:
             config_value = load_community_config(db)
@@ -637,6 +830,7 @@ class CommunityClient:
             online = True
             last_error: str | None = None
             remote_has_contribution = config_value.remote_has_contribution
+            opponent_tracking_required = config_value.opponent_tracking_required
             if not records:
                 try:
                     with self._http() as client:
@@ -660,6 +854,9 @@ class CommunityClient:
                             last_error = "invalid_me_response"
                         else:
                             remote_has_contribution = me.has_contribution
+                            opponent_tracking_required = me.opponent_tracking_required
+                            if opponent_tracking_required and config_value.consent_version != "2":
+                                last_error = "consent_upgrade_required"
                     else:
                         last_error = f"probe_http_{probe_status}"
             for record in records:
@@ -726,7 +923,83 @@ class CommunityClient:
                 remote_has_contribution = True
                 db.commit()
 
-            pending = int(
+            opponent_delivered = 0
+            opponent_queued = self.enqueue_opponents(
+                db, revalidate_existing=revalidate_opponents
+            )
+            opponent_records = list(
+                db.scalars(
+                    select(CommunityOpponentSyncRecord)
+                    .where(CommunityOpponentSyncRecord.state == "pending")
+                    .order_by(CommunityOpponentSyncRecord.id)
+                )
+            )
+            if opponent_records and config_value.consent_version != "2":
+                last_error = "consent_upgrade_required"
+            elif last_error is None:
+                for opponent_record in opponent_records:
+                    ensure_community_post_session(db)
+                    tournaments = _completed_tournaments(db, [opponent_record.tournament_id])
+                    core_record = db.scalar(
+                        select(CommunitySyncRecord).where(
+                            CommunitySyncRecord.tournament_id
+                            == opponent_record.tournament_id,
+                            CommunitySyncRecord.state == "synced",
+                            CommunitySyncRecord.remote_public_id.is_not(None),
+                        )
+                    )
+                    if not tournaments or core_record is None or not core_record.remote_public_id:
+                        continue
+                    payload = serialize_tournament_opponents(tournaments[0])
+                    opponent_record.attempts += 1
+                    opponent_record.last_attempt_at = utcnow()
+                    try:
+                        ensure_community_post_session(db)
+                        headers = self._auth_headers(credentials)
+                        headers["Content-Type"] = "application/json"
+                        with self._http() as client:
+                            response_status, response_data = self._request_json(
+                                client,
+                                "POST",
+                                self._endpoint(
+                                    config_value,
+                                    f"/v1/sync/tournaments/{core_record.remote_public_id}/opponents",
+                                ),
+                                accepted_statuses={200, 201},
+                                headers=headers,
+                                content=_canonical_bytes(payload),
+                            )
+                    except CommunityRemoteError as exc:
+                        last_error = exc.code
+                        opponent_record.last_error_code = last_error
+                        db.commit()
+                        break
+                    except httpx.RequestError:
+                        online = False
+                        last_error = "hub_offline"
+                        opponent_record.last_error_code = last_error
+                        db.commit()
+                        break
+                    if response_status not in {200, 201}:
+                        last_error = f"opponent_sync_http_{response_status}"
+                        opponent_record.last_error_code = last_error
+                        db.commit()
+                        break
+                    try:
+                        CommunityOpponentSyncHubResponse.model_validate(response_data)
+                    except ValueError:
+                        last_error = "invalid_opponent_sync_response"
+                        opponent_record.last_error_code = last_error
+                        db.commit()
+                        break
+                    ensure_community_post_session(db)
+                    opponent_record.state = "synced"
+                    opponent_record.synced_at = utcnow()
+                    opponent_record.last_error_code = None
+                    opponent_delivered += 1
+                    db.commit()
+
+            core_pending = int(
                 db.scalar(
                     select(func.count()).select_from(CommunitySyncRecord).where(
                         CommunitySyncRecord.state == "pending"
@@ -734,6 +1007,15 @@ class CommunityClient:
                 )
                 or 0
             )
+            opponent_pending = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(CommunityOpponentSyncRecord)
+                    .where(CommunityOpponentSyncRecord.state == "pending")
+                )
+                or 0
+            )
+            pending = core_pending + opponent_pending
             synced_total = int(
                 db.scalar(
                     select(func.count()).select_from(CommunitySyncRecord).where(
@@ -745,21 +1027,28 @@ class CommunityClient:
             now = utcnow()
             config_value = load_community_config(db).model_copy(
                 update={
-                    "last_sync_at": now if delivered else config_value.last_sync_at,
+                    "last_sync_at": (
+                        now if delivered or opponent_delivered else config_value.last_sync_at
+                    ),
                     "last_contact_at": now if online else config_value.last_contact_at,
                     "last_error_code": last_error,
                     "remote_has_contribution": remote_has_contribution,
+                    "opponent_tracking_required": opponent_tracking_required,
                 }
             )
             ensure_community_post_session(db)
             save_community_config(db, config_value)
             return CommunitySyncResponse(
-                queued=queued,
-                synced=delivered,
+                queued=queued + opponent_queued,
+                synced=delivered + opponent_delivered,
                 pending=pending,
                 online=online,
                 available=online
                 and pending == 0
+                and (
+                    not config_value.opponent_tracking_required
+                    or config_value.consent_version == "2"
+                )
                 and (synced_total > 0 or remote_has_contribution)
                 and last_error is None,
                 error_code=last_error,
@@ -776,7 +1065,8 @@ class CommunityClient:
         credentials_present = credentials is not None
         if config_value.enabled and credentials is not None:
             self.enqueue_completed(db, secrets_value=credentials)
-        pending = int(
+            self.enqueue_opponents(db)
+        core_pending = int(
             db.scalar(
                 select(func.count()).select_from(CommunitySyncRecord).where(
                     CommunitySyncRecord.state == "pending"
@@ -784,6 +1074,15 @@ class CommunityClient:
             )
             or 0
         )
+        opponent_pending = int(
+            db.scalar(
+                select(func.count())
+                .select_from(CommunityOpponentSyncRecord)
+                .where(CommunityOpponentSyncRecord.state == "pending")
+            )
+            or 0
+        )
+        pending = core_pending + opponent_pending
         synced = int(
             db.scalar(
                 select(func.count()).select_from(CommunitySyncRecord).where(
@@ -801,6 +1100,11 @@ class CommunityClient:
         reason: str | None = None
         if not configured:
             reason = "not_configured"
+        elif (
+            config_value.opponent_tracking_required
+            and config_value.consent_version != "2"
+        ):
+            reason = "consent_upgrade_required"
         elif pending:
             reason = "pending_sync"
         elif online is False:
@@ -810,6 +1114,10 @@ class CommunityClient:
         result = CommunityStatusResponse(
             configured=configured,
             available=configured
+            and (
+                not config_value.opponent_tracking_required
+                or config_value.consent_version == "2"
+            )
             and pending == 0
             and (synced > 0 or config_value.remote_has_contribution)
             and online is True,
@@ -817,7 +1125,12 @@ class CommunityClient:
             pending=pending,
             synced=synced,
             last_sync_at=config_value.last_sync_at,
-            consent_version=COMMUNITY_CONSENT_VERSION,
+            consent_version=config_value.consent_version or "1",
+            required_consent_version=COMMUNITY_CONSENT_VERSION,
+            opponent_tracking_enabled=(
+                config_value.opponent_tracking_required
+                and config_value.consent_version == "2"
+            ),
             blocked_reason=reason,
         )
         ensure_community_post_session(db)
@@ -837,7 +1150,13 @@ class CommunityClient:
             if not config_value.enabled or credentials is None:
                 raise CommunityNotConfiguredError()
             self.enqueue_completed(db, secrets_value=credentials)
-            pending = int(
+            self.enqueue_opponents(db)
+            if (
+                config_value.opponent_tracking_required
+                and config_value.consent_version != "2"
+            ):
+                raise CommunityConsentRequiredError()
+            core_pending = int(
                 db.scalar(
                     select(func.count()).select_from(CommunitySyncRecord).where(
                         CommunitySyncRecord.state == "pending"
@@ -845,6 +1164,15 @@ class CommunityClient:
                 )
                 or 0
             )
+            opponent_pending = int(
+                db.scalar(
+                    select(func.count())
+                    .select_from(CommunityOpponentSyncRecord)
+                    .where(CommunityOpponentSyncRecord.state == "pending")
+                )
+                or 0
+            )
+            pending = core_pending + opponent_pending
             if pending:
                 raise CommunityPendingError()
             synced = int(
@@ -875,6 +1203,18 @@ class CommunityClient:
                 self._record_connection_result(db, config_value, error="hub_offline")
                 raise CommunityOfflineError() from exc
             if response_status != 200:
+                if response_status == 403 and config_value.consent_version != "2":
+                    save_community_config(
+                        db,
+                        config_value.model_copy(
+                            update={
+                                "opponent_tracking_required": True,
+                                "last_contact_at": utcnow(),
+                                "last_error_code": "consent_upgrade_required",
+                            }
+                        ),
+                    )
+                    raise CommunityConsentRequiredError()
                 if response_status == 404:
                     self._record_connection_result(db, config_value, error=None)
                     raise CommunityResourceNotFoundError()
@@ -914,7 +1254,7 @@ def sync_community_after_rescan(db: Session, client: CommunityClient) -> Communi
     if not config_value.enabled:
         return None
     try:
-        return client.sync(db)
+        return client.sync(db, revalidate_opponents=True)
     except (CommunityError, CommunitySecretError, OSError, ValueError):
         db.rollback()
         return None

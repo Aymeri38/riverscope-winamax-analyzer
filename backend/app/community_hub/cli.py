@@ -37,6 +37,18 @@ def _parser() -> argparse.ArgumentParser:
     delete_parser.add_argument("--public-id", required=True)
     delete_parser.add_argument("--confirm", required=True)
 
+    suppress_parser = subparsers.add_parser(
+        "suppress-opponent",
+        help="Supprime un profil adverse et empeche sa recreation",
+    )
+    suppress_parser.add_argument("--public-id", required=True)
+    suppress_parser.add_argument("--confirm", required=True)
+
+    purge_parser = subparsers.add_parser(
+        "purge-opponents", help="Purge les profils adverses inactifs"
+    )
+    purge_parser.add_argument("--retention-days", type=int)
+
     subparsers.add_parser("list-members", help="Liste les membres sans aucun secret")
     devices_parser = subparsers.add_parser(
         "list-devices", help="Liste les appareils sans jeton ni hash"
@@ -75,8 +87,11 @@ def run(
         list_devices,
         list_invites,
         list_members,
+        purge_opponents,
         revoke,
+        suppress_opponent_by_public_id,
     )
+    from app.community_hub.config import get_hub_config
     from app.community_hub.database import HubDatabase
 
     hub_db = database or HubDatabase.from_environment()
@@ -129,6 +144,21 @@ def run(
         elif args.command == "delete-member":
             delete_member(db, public_id=args.public_id, confirmation=args.confirm)
             print(json.dumps({"status": "deleted", "member_id": args.public_id}))
+        elif args.command == "suppress-opponent":
+            suppress_opponent_by_public_id(
+                db,
+                public_id=args.public_id,
+                confirmation=args.confirm,
+            )
+            print(json.dumps({"status": "suppressed", "opponent_id": args.public_id}))
+        elif args.command == "purge-opponents":
+            retention_days = (
+                args.retention_days
+                if args.retention_days is not None
+                else get_hub_config(dict(env)).opponent_retention_days
+            )
+            purged = purge_opponents(db, retention_days=retention_days)
+            print(json.dumps({"status": "purged", "count": purged}))
         elif args.command == "list-members":
             print(json.dumps({"items": list_members(db)}))
         elif args.command == "list-devices":
@@ -140,7 +170,7 @@ def run(
         else:
             print(json.dumps({"items": list_invites(db)}))
         return 0
-    except AdminError as exc:
+    except (AdminError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     finally:

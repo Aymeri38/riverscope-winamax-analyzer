@@ -6,7 +6,8 @@ from uuid import uuid4
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.community_hub.models import Device, Invite, Member, SharedTournament
+from app.community_hub.models import Device, Invite, Member, Opponent, SharedTournament
+from app.community_hub.opponents import purge_inactive_opponents, suppress_opponent
 from app.community_hub.security import (
     DEVICE_TOKEN_LIFETIME,
     DEVICE_TOKEN_PREFIX,
@@ -43,7 +44,7 @@ def bootstrap_owner(
         display_name=normalized_name,
         display_name_key=display_name_key,
         role="owner",
-        policy_version="1",
+        policy_version="2",
         consented_at=now,
     )
     db.add(member)
@@ -129,7 +130,26 @@ def delete_member(db: Session, *, public_id: str, confirmation: str) -> None:
     if deleted.rowcount != 1:
         db.rollback()
         raise AdminError("Membre introuvable.")
+    db.execute(delete(Opponent).where(~Opponent.tournaments.any()))
     db.commit()
+
+
+def suppress_opponent_by_public_id(
+    db: Session,
+    *,
+    public_id: str,
+    confirmation: str,
+) -> None:
+    try:
+        suppress_opponent(db, public_id=public_id, confirmation=confirmation)
+    except ValueError as exc:
+        raise AdminError(str(exc)) from exc
+
+
+def purge_opponents(db: Session, *, retention_days: int) -> int:
+    if retention_days <= 0:
+        raise AdminError("La retention doit etre strictement positive.")
+    return purge_inactive_opponents(db, retention_days=retention_days)
 
 
 def list_members(db: Session) -> list[dict[str, object]]:

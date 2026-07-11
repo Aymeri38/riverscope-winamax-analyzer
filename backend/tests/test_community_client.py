@@ -9,7 +9,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import delete, func, select
+from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy.orm import Session
 
 from app.core.community_secret import (
     CommunitySecretError,
@@ -19,9 +20,21 @@ from app.core.community_secret import (
 )
 from app.core.process_guard import AnalysisInterlock
 from app.main import app
-from app.models import CommunitySyncRecord, Tournament
+from app.database.session import Base
+from app.models import (
+    CommunityOpponentSyncRecord,
+    CommunitySyncRecord,
+    Player,
+    Setting,
+    Tournament,
+)
 from app.schemas.api import AnalyzerSettings
-from app.schemas.community import CommunityJoinRequest, CommunityLocalConfig
+from app.schemas.community import (
+    CommunityConsentRequest,
+    CommunityJoinRequest,
+    CommunityLocalConfig,
+    CommunitySyncResponse,
+)
 from app.services.community_client import (
     CommunityAlreadyConfiguredError,
     CommunityConfigurationError,
@@ -29,10 +42,12 @@ from app.services.community_client import (
     CommunityPendingError,
     CommunityRemoteError,
     serialize_completed_tournament,
+    serialize_tournament_opponents,
+    sync_community_after_rescan,
 )
 import app.services.community_client as community_client_module
 from app.services.importer import import_pair
-from app.services.settings import save_community_config, save_settings
+from app.services.settings import load_community_config, save_community_config, save_settings
 
 
 FIXTURES = Path(__file__).parents[2] / "fixtures"
@@ -654,7 +669,7 @@ def test_contributor_profile_local_proxy_uses_scoped_path_and_preserves_404(db) 
     assert response.json()["contributor"]["public_id"] == "alice-public"
     assert response.headers["Cache-Control"] == "no-store"
     assert missing.status_code == 404
-    assert missing.json()["detail"] == "Contributeur introuvable."
+    assert missing.json()["detail"] == "Ressource communautaire introuvable."
     assert seen == [
         "/v1/contributors/alice-public/profile",
         "/v1/contributors/missing/profile",
@@ -848,3 +863,494 @@ def test_client_payload_is_accepted_by_real_local_hub_contract(db, tmp_path) -> 
         assert fresh.leave(db) is True
 
     hub_database.dispose()
+
+
+def test_sync_delivers_core_then_mandatory_opponent_enrichment(db) -> None:
+    tournament = _import_completed(db)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1/sync/tournaments":
+            return httpx.Response(
+                201,
+                json={
+                    "status": "created",
+                    "public_id": "remote-tournament-1",
+                    "hand_count": tournament.total_hands,
+                },
+            )
+        assert request.url.path == "/v1/sync/tournaments/remote-tournament-1/opponents"
+        body = json.loads(request.content)
+        assert [item["alias"] for item in body["opponents"]] == [
+            "OPPONENT_1",
+            "OPPONENT_2",
+        ]
+        assert all(item["display_name"] for item in body["opponents"])
+        assert "HERO" not in {item["alias"] for item in body["opponents"]}
+        return httpx.Response(
+            201,
+            json={
+                "status": "created",
+                "opponent_count": 2,
+                "observation_count": tournament.total_hands * 2,
+            },
+        )
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            opponent_tracking_required=True,
+        ),
+    )
+    result = community.sync(db)
+    assert result.queued == 2
+    assert result.synced == 2
+    assert result.pending == 0
+    assert result.available is True
+    record = db.scalar(select(CommunityOpponentSyncRecord))
+    assert record is not None
+    assert record.state == "synced"
+    assert record.tournament_id == tournament.id
+    assert not hasattr(record, "payload")
+    assert [request.url.path for request in requests] == [
+        "/v1/sync/tournaments",
+        "/v1/sync/tournaments/remote-tournament-1/opponents",
+    ]
+
+
+def test_retro_enrichment_is_queued_for_an_already_synced_tournament(db) -> None:
+    tournament = _import_completed(db)
+    db.add(
+        CommunitySyncRecord(
+            tournament_id=tournament.id,
+            client_key="a" * 64,
+            schema_version="1",
+            payload_sha256="b" * 64,
+            state="synced",
+            remote_public_id="existing-remote-id",
+        )
+    )
+    db.commit()
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/v1/me":
+            return httpx.Response(
+                200,
+                json={
+                    "member_id": "member-1",
+                    "display_name": "Alice",
+                    "has_contribution": True,
+                    "policy_version": "2",
+                    "opponent_tracking_required": True,
+                },
+            )
+        assert request.url.path == "/v1/sync/tournaments/existing-remote-id/opponents"
+        return httpx.Response(
+            201,
+            json={"status": "created", "opponent_count": 2, "observation_count": 16},
+        )
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+            opponent_tracking_required=True,
+        ),
+    )
+    result = community.sync(db)
+    assert result.queued == 1
+    assert result.synced == 1
+    assert result.pending == 0
+    assert requests == [
+        "/v1/me",
+        "/v1/sync/tournaments/existing-remote-id/opponents",
+    ]
+
+
+def test_opponent_pending_queue_blocks_views_and_survives_offline_retry(db) -> None:
+    tournament = _import_completed(db)
+
+    def offline_after_core(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/sync/tournaments":
+            return httpx.Response(
+                201,
+                json={
+                    "status": "created",
+                    "public_id": "remote-offline-opponents",
+                    "hand_count": tournament.total_hands,
+                },
+            )
+        raise httpx.ConnectError("synthetic opponent offline", request=request)
+
+    community, _store = _configured_client(db, offline_after_core)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            opponent_tracking_required=True,
+        ),
+    )
+    result = community.sync(db)
+    assert result.online is False
+    assert result.pending == 1
+    pending = db.scalar(select(CommunityOpponentSyncRecord))
+    assert pending is not None and pending.state == "pending"
+    with pytest.raises(CommunityPendingError):
+        community.proxy_get(db, "/v1/opponents")
+
+
+def test_v1_consent_never_serializes_names_and_upgrade_creates_queue(db, monkeypatch) -> None:
+    tournament = _import_completed(db)
+    db.add(
+        CommunitySyncRecord(
+            tournament_id=tournament.id,
+            client_key="c" * 64,
+            schema_version="1",
+            payload_sha256="d" * 64,
+            state="synced",
+            remote_public_id="legacy-remote",
+        )
+    )
+    db.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/consent"
+        return httpx.Response(
+            200,
+            json={"policy_version": "2", "opponent_tracking_enabled": True},
+        )
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="1",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+            opponent_tracking_required=True,
+        ),
+    )
+    original = community_client_module.serialize_tournament_opponents
+    monkeypatch.setattr(
+        community_client_module,
+        "serialize_tournament_opponents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("names read before v2 consent")
+        ),
+    )
+    status = community.status(db)
+    assert status.available is False
+    assert status.blocked_reason == "consent_upgrade_required"
+    assert db.scalar(select(CommunityOpponentSyncRecord)) is None
+    monkeypatch.setattr(
+        community_client_module, "serialize_tournament_opponents", original
+    )
+    upgraded = community.upgrade_consent(
+        db, CommunityConsentRequest(consent=True, policy_version="2")
+    )
+    assert upgraded.opponent_tracking_enabled is True
+    queued = db.scalar(select(CommunityOpponentSyncRecord))
+    assert queued is not None and queued.state == "pending"
+
+
+def test_legacy_client_learns_v2_requirement_from_collective_403(db) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="1",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+            opponent_tracking_required=False,
+        ),
+    )
+    with pytest.raises(community_client_module.CommunityConsentRequiredError):
+        community.proxy_get(db, "/v1/contributors")
+    config = load_community_config(db)
+    assert config.opponent_tracking_required is True
+    assert config.last_error_code == "consent_upgrade_required"
+
+
+def test_opponent_list_profile_and_consent_local_proxies(db) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.url.path == "/v1/consent":
+            return httpx.Response(
+                200,
+                json={"policy_version": "2", "opponent_tracking_enabled": True},
+            )
+        if request.url.path == "/v1/opponents":
+            assert dict(request.url.params) == {"limit": "25", "offset": "5"}
+            return httpx.Response(
+                200,
+                json={"items": [], "total": 0, "limit": 25, "offset": 5},
+            )
+        assert request.url.path == "/v1/opponents/opponent-public/profile"
+        return httpx.Response(200, json={"identity": {"public_id": "opponent-public"}})
+
+    community, _store = _configured_client(db, handler)
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="1",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+            opponent_tracking_required=True,
+        ),
+    )
+    original = app.state.community_client
+    app.state.community_client = community
+    try:
+        with TestClient(app) as client:
+            consent = client.post(
+                "/api/community/consent",
+                json={"consent": True, "policy_version": "2"},
+            )
+            listing = client.get("/api/community/opponents?limit=25&offset=5")
+            profile = client.get(
+                "/api/community/opponents/opponent-public/profile"
+            )
+    finally:
+        app.state.community_client = original
+    assert consent.status_code == 200
+    assert listing.status_code == 200
+    assert profile.status_code == 200
+    assert seen == [
+        ("POST", "/v1/consent"),
+        ("GET", "/v1/opponents"),
+        ("GET", "/v1/opponents/opponent-public/profile"),
+    ]
+
+
+def test_leave_deletes_both_delivery_queues(db) -> None:
+    tournament = _import_completed(db)
+    core = CommunitySyncRecord(
+        tournament_id=tournament.id,
+        client_key="e" * 64,
+        schema_version="1",
+        payload_sha256="f" * 64,
+        state="synced",
+        remote_public_id="remote-leave",
+    )
+    db.add(core)
+    db.flush()
+    db.add(
+        CommunityOpponentSyncRecord(
+            tournament_id=tournament.id,
+            schema_version="1",
+            payload_sha256="1" * 64,
+            state="pending",
+        )
+    )
+    db.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        return httpx.Response(204)
+
+    community, store = _configured_client(db, handler)
+    assert community.leave(db) is True
+    assert store.load() is None
+    assert db.scalar(select(func.count()).select_from(CommunitySyncRecord)) == 0
+    assert db.scalar(select(func.count()).select_from(CommunityOpponentSyncRecord)) == 0
+
+
+def test_active_file_guard_runs_before_opponent_name_serialization(
+    db, tmp_path, monkeypatch
+) -> None:
+    tournament = _import_completed(db)
+    db.add(
+        CommunitySyncRecord(
+            tournament_id=tournament.id,
+            client_key="2" * 64,
+            schema_version="1",
+            payload_sha256="3" * 64,
+            state="synced",
+            remote_public_id="remote-guard",
+        )
+    )
+    db.commit()
+    community, _store = _configured_client(
+        db,
+        lambda _request: (_ for _ in ()).throw(
+            AssertionError("network called while active")
+        ),
+    )
+    active = tmp_path / "active-Expresso.txt"
+    active.write_text("Winamax Poker - active", encoding="utf-8")
+    save_settings(
+        db,
+        AnalyzerSettings(history_paths=[str(tmp_path)], hero_name="HERO"),
+    )
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            enrolled_at=datetime(2026, 7, 11),
+            opponent_tracking_required=True,
+        ),
+    )
+    monkeypatch.setattr(
+        community_client_module,
+        "serialize_tournament_opponents",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("names serialized while active")
+        ),
+    )
+    with pytest.raises(community_client_module.CommunityActivityError):
+        community.sync(db)
+    assert db.scalar(select(CommunityOpponentSyncRecord)) is None
+
+
+def test_local_opponent_queue_table_is_added_without_losing_v1_data(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{(tmp_path / 'legacy-local.db').as_posix()}")
+    legacy_tables = [
+        table
+        for table in Base.metadata.sorted_tables
+        if table.name != "community_opponent_sync_records"
+    ]
+    Base.metadata.create_all(engine, tables=legacy_tables)
+    with Session(engine) as db:
+        db.add(Setting(key="legacy-sentinel", value_json='{"preserved":true}'))
+        db.commit()
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        assert db.scalar(
+            select(Setting.value_json).where(Setting.key == "legacy-sentinel")
+        ) == '{"preserved":true}'
+    with engine.connect() as connection:
+        assert "community_opponent_sync_records" in set(
+            engine.dialect.get_table_names(connection)
+        )
+    engine.dispose()
+
+
+def test_manual_rescan_revalidates_changed_opponent_payload_without_status_rehash(
+    db, monkeypatch
+) -> None:
+    tournament = _import_completed(db)
+    db.add(
+        CommunitySyncRecord(
+            tournament_id=tournament.id,
+            client_key="4" * 64,
+            schema_version="1",
+            payload_sha256="5" * 64,
+            state="synced",
+            remote_public_id="remote-revalidate",
+        )
+    )
+    db.commit()
+    community, _store = _configured_client(
+        db,
+        lambda _request: httpx.Response(
+            409
+        ),  # Changed remote identity is intentionally surfaced as a conflict.
+    )
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            enrolled_at=datetime(2026, 7, 11),
+            last_contact_at=datetime(2026, 7, 11),
+            remote_has_contribution=True,
+            opponent_tracking_required=True,
+        ),
+    )
+    assert community.enqueue_opponents(db) == 1
+    record = db.scalar(select(CommunityOpponentSyncRecord))
+    assert record is not None
+    original_digest = record.payload_sha256
+    record.state = "synced"
+    record.synced_at = datetime(2026, 7, 11)
+    db.commit()
+    opponent = db.scalar(select(Player).where(Player.is_hero.is_(False)).order_by(Player.id))
+    assert opponent is not None
+    opponent.display_name = "Corrected Opponent Name"
+    db.commit()
+
+    def forbidden_serializer(*_args, **_kwargs):
+        raise AssertionError("ordinary status must not rehash delivered opponent payloads")
+
+    original_serializer = community_client_module.serialize_tournament_opponents
+    monkeypatch.setattr(
+        community_client_module, "serialize_tournament_opponents", forbidden_serializer
+    )
+    assert community.status(db).pending == 0
+    assert community.enqueue_opponents(db) == 0
+    monkeypatch.setattr(
+        community_client_module,
+        "serialize_tournament_opponents",
+        original_serializer,
+    )
+    assert community.enqueue_opponents(db, revalidate_existing=True) == 1
+    db.refresh(record)
+    assert record.state == "pending"
+    assert record.synced_at is None
+    assert record.payload_sha256 != original_digest
+
+
+def test_post_rescan_helper_requests_existing_opponent_revalidation(db, monkeypatch) -> None:
+    save_settings(db, AnalyzerSettings(history_paths=[], hero_name=""))
+    save_community_config(
+        db,
+        CommunityLocalConfig(
+            enabled=True,
+            hub_url="https://community.example.test",
+            consent_version="2",
+            opponent_tracking_required=True,
+        ),
+    )
+    community = CommunityClient(secret_store=MemoryCommunitySecretStore())
+    seen: list[bool] = []
+
+    def fake_sync(_db, *, revalidate_opponents: bool = False):
+        seen.append(revalidate_opponents)
+        return CommunitySyncResponse(
+            queued=0,
+            synced=0,
+            pending=0,
+            online=True,
+            available=True,
+        )
+
+    monkeypatch.setattr(community, "sync", fake_sync)
+    result = sync_community_after_rescan(db, community)
+    assert result is not None
+    assert seen == [True]

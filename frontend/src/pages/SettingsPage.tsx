@@ -176,7 +176,7 @@ export function SettingsPage() {
       <PageHeader
         eyebrow="Configuration locale"
         title="Paramètres"
-        description="Toutes les préférences et données restent sur cet ordinateur. Aucun identifiant Winamax n’est nécessaire."
+        description="Les préférences et analyses restent locales. Seule la communauté v2, après consentement explicite, transmet au VPS des tournois terminés et pseudos adverses chiffrés. Aucun identifiant Winamax n’est nécessaire."
         actions={<button className="button primary" onClick={saveSettings} disabled={saving} type="button"><Save size={17} /> {saving ? "Enregistrement…" : "Enregistrer"}</button>}
       />
       {saveMessage && <div className={`toast-inline ${saveMessage.includes("enregistrés") ? "success" : "error"}`} role="status">{saveMessage.includes("enregistrés") && <Check size={17} />}{saveMessage}</div>}

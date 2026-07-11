@@ -34,7 +34,7 @@ export function TournamentDetailPage() {
           </section>
 
           <div className="two-column-grid detail-grid">
-            <SectionCard title="Participants" subtitle="Les adversaires restent locaux à cet appareil.">
+            <SectionCard title="Participants" subtitle="Cette vue utilise la base locale ; tout partage adverse communautaire dépend du consentement v2 et reste post-session.">
               {data.players?.length ? (
                 <div className="players-list">
                   {data.players.map((player, index) => (

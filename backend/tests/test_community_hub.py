@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+import base64
 import json
 from pathlib import Path
 import time
@@ -11,7 +12,8 @@ import pytest
 import httpx
 from fastapi.testclient import TestClient
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.orm import selectinload
 
 from app.community_hub.admin import (
     AdminError,
@@ -20,18 +22,37 @@ from app.community_hub.admin import (
     delete_member,
     list_devices,
     list_members,
+    purge_opponents,
     revoke,
+    suppress_opponent_by_public_id,
 )
 from app.community_hub.api import create_hub_app
 from app.community_hub.config import MAX_BODY_BYTES, get_hub_config
 from app.community_hub.database import HubBase, HubDatabase
-from app.community_hub.models import Device, Invite, Member, SharedTournament
-from app.community_hub.models import SharedHand, SyncReceipt
+from app.community_hub.models import (
+    Device,
+    Invite,
+    Member,
+    Opponent,
+    OpponentSuppression,
+    OpponentSyncReceipt,
+    SharedHand,
+    SharedOpponentObservation,
+    SharedTournament,
+    SharedTournamentOpponent,
+    SyncReceipt,
+)
+from app.community_hub.opponent_identity import OpponentIdentityError, OpponentIdentityService
 from app.community_hub.rate_limit import InMemoryRateLimiter
 from app.community_hub.runner import run, validate_tls_binding
-from app.community_hub.schemas import SyncTournamentRequest
+from app.community_hub.schemas import OpponentSyncRequest, SyncTournamentRequest
+from app.community_hub.opponents import sync_tournament_opponents
 from app.community_hub.service import sync_tournament
-from app.core.process_guard import AnalysisInterlock, SAFETY_EXIT_CODE
+from app.core.process_guard import (
+    AnalysisForbiddenError,
+    AnalysisInterlock,
+    SAFETY_EXIT_CODE,
+)
 from app.core.community_secret import MemoryCommunitySecretStore
 from app.models import Tournament
 from app.schemas.api import AnalyzerSettings
@@ -193,6 +214,33 @@ def tournament_payload(client_key: str = "a" * 64) -> dict:
     }
 
 
+def opponent_payload(
+    first_name: str = "Opponent Alpha",
+    second_name: str = "Opponent Beta",
+) -> dict:
+    return {
+        "schema_version": "1",
+        "opponents": [
+            {
+                "alias": "OPPONENT_1",
+                "display_name": first_name,
+                "final_rank": 2,
+                "reward": 0,
+                "starting_stack": 500,
+                "final_stack": 480,
+            },
+            {
+                "alias": "OPPONENT_2",
+                "display_name": second_name,
+                "final_rank": 3,
+                "reward": 0,
+                "starting_stack": 500,
+                "final_stack": 480,
+            },
+        ],
+    }
+
+
 @pytest.fixture
 def hub(tmp_path):
     database = HubDatabase(tmp_path / "hub-data" / "community_hub.db")
@@ -221,18 +269,56 @@ def hub(tmp_path):
     database.dispose()
 
 
+@pytest.fixture
+def tracking_hub(tmp_path):
+    environment = {
+        "WXA_HUB_DATA_DIR": str(tmp_path / "tracking-hub"),
+        "WXA_HUB_OPPONENT_TRACKING": "YES",
+        "WXA_HUB_OPPONENT_IDENTITY_KEY": base64.b64encode(b"i" * 32).decode(),
+        "WXA_HUB_OPPONENT_ENCRYPTION_KEY": base64.b64encode(b"e" * 32).decode(),
+    }
+    config = get_hub_config(environment)
+    database = HubDatabase(config.database_path)
+    database.initialize()
+    db = database.session()
+    owner, _owner_device, owner_token = bootstrap_owner(
+        db, display_name="Owner", device_label="Owner PC"
+    )
+    invite, invite_token = create_invite(db, expires_hours=24)
+    db.close()
+    app = create_hub_app(
+        database,
+        docs_enabled=False,
+        trusted_hosts=("testserver", "localhost"),
+        interlock=AnalysisInterlock(),
+        hub_config=config,
+    )
+    with TestClient(app) as client:
+        yield {
+            "client": client,
+            "database": database,
+            "app": app,
+            "config": config,
+            "owner": owner,
+            "owner_token": owner_token,
+            "invite": invite,
+            "invite_token": invite_token,
+        }
+    database.dispose()
+
+
 def auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def enroll_friend(hub, name: str = "Alice") -> dict:
+def enroll_friend(hub, name: str = "Alice", policy_version: str = "1") -> dict:
     response = hub["client"].post(
         "/v1/enroll",
         json={
             "invite_token": hub["invite_token"],
             "display_name": name,
             "device_label": f"PC {name}",
-            "policy_version": "1",
+            "policy_version": policy_version,
             "consent": True,
         },
     )
@@ -240,7 +326,7 @@ def enroll_friend(hub, name: str = "Alice") -> dict:
     return response.json()
 
 
-def enroll_additional_friend(hub, name: str) -> dict:
+def enroll_additional_friend(hub, name: str, policy_version: str = "1") -> dict:
     db = hub["database"].session()
     _invite, invite_token = create_invite(db, expires_hours=24)
     db.close()
@@ -250,7 +336,7 @@ def enroll_additional_friend(hub, name: str) -> dict:
             "invite_token": invite_token,
             "display_name": name,
             "device_label": f"PC {name}",
-            "policy_version": "1",
+            "policy_version": policy_version,
             "consent": True,
         },
     )
@@ -267,6 +353,11 @@ def test_hub_uses_separate_database_and_expected_tables(hub):
         "shared_tournaments",
         "shared_hands",
         "sync_receipts",
+        "opponents",
+        "opponent_suppressions",
+        "opponent_sync_receipts",
+        "shared_tournament_opponents",
+        "shared_opponent_observations",
     }
 
 
@@ -298,6 +389,25 @@ def test_auth_enrollment_invite_one_time_and_hash_storage(hub):
         },
     )
     assert repeated.status_code == 400
+
+
+def test_v2_enrollment_fails_without_server_tracking_before_invite_mutation(hub):
+    response = hub["client"].post(
+        "/v1/enroll",
+        json={
+            "invite_token": hub["invite_token"],
+            "display_name": "V2 member",
+            "device_label": "V2 PC",
+            "policy_version": "2",
+            "consent": True,
+        },
+    )
+    assert response.status_code == 503
+    db = hub["database"].session()
+    invite = db.scalar(select(Invite).where(Invite.public_id == hub["invite"].public_id))
+    assert invite is not None and invite.used_at is None
+    assert db.scalar(select(Member.id).where(Member.display_name == "V2 member")) is None
+    db.close()
 
 
 def test_request_size_trusted_host_and_expired_device_guards(hub):
@@ -389,6 +499,8 @@ def test_consultation_requires_a_contribution(hub):
         "member_id": enrolled["member_id"],
         "display_name": "Alice",
         "has_contribution": False,
+        "policy_version": "1",
+        "opponent_tracking_required": False,
     }
     response = hub["client"].get(
         "/v1/dashboard", headers=auth(enrolled["device_token"])
@@ -713,6 +825,503 @@ def test_contributor_profile_never_adds_different_currencies(hub):
     ]
 
 
+def test_tracking_configuration_is_fail_closed_before_database_mutation(tmp_path):
+    base = {
+        "WXA_HUB_DATA_DIR": str(tmp_path / "must-not-exist"),
+        "WXA_HUB_OPPONENT_TRACKING": "YES",
+    }
+    with pytest.raises(ValueError, match="OPPONENT_IDENTITY_KEY"):
+        get_hub_config(base)
+    assert not (tmp_path / "must-not-exist").exists()
+    invalid = {
+        **base,
+        "WXA_HUB_OPPONENT_IDENTITY_KEY": base64.b64encode(b"short").decode(),
+        "WXA_HUB_OPPONENT_ENCRYPTION_KEY": base64.b64encode(b"e" * 32).decode(),
+    }
+    with pytest.raises(ValueError, match="32 octets"):
+        get_hub_config(invalid)
+    same_key = base64.b64encode(b"s" * 32).decode()
+    with pytest.raises(ValueError, match="distinctes"):
+        get_hub_config(
+            {
+                **base,
+                "WXA_HUB_OPPONENT_IDENTITY_KEY": same_key,
+                "WXA_HUB_OPPONENT_ENCRYPTION_KEY": same_key,
+            }
+        )
+
+
+def test_create_hub_app_refuses_blocked_interlock_before_opponent_scan(tracking_hub):
+    interlock = AnalysisInterlock()
+    interlock.trip("Winamax detected during startup")
+
+    with pytest.raises(AnalysisForbiddenError):
+        create_hub_app(
+            tracking_hub["database"],
+            docs_enabled=False,
+            trusted_hosts=("testserver",),
+            interlock=interlock,
+            hub_config=tracking_hub["config"],
+        )
+
+
+def test_opponent_identity_normalizes_exactly_and_encrypts_with_authenticated_aad():
+    service = OpponentIdentityService(
+        identity_key=b"i" * 32,
+        encryption_key=b"e" * 32,
+        key_version=1,
+    )
+    display, first_key = service.identity_for("  A\u030Alice  ")
+    _same_display, same_key = service.identity_for("ÅLICE")
+    _different_display, different_key = service.identity_for("ÅLICE!")
+    assert display == "Ålice"
+    assert first_key == same_key
+    assert first_key != different_key
+    encrypted = service.encrypt("Sensitive Alias")
+    assert b"Sensitive Alias" not in encrypted.ciphertext
+    assert service.decrypt(
+        identity_key=encrypted.identity_key,
+        ciphertext=encrypted.ciphertext,
+        nonce=encrypted.nonce,
+        key_version=encrypted.key_version,
+    ) == "Sensitive Alias"
+    with pytest.raises(OpponentIdentityError):
+        service.decrypt(
+            identity_key="0" * 64,
+            ciphertext=encrypted.ciphertext,
+            nonce=encrypted.nonce,
+            key_version=encrypted.key_version,
+        )
+
+
+def test_opponent_consent_enrichment_crypto_idempotence_and_profile(
+    tracking_hub, caplog
+):
+    client = tracking_hub["client"]
+    legacy = enroll_friend(tracking_hub, policy_version="1")
+    legacy_headers = auth(legacy["device_token"])
+    core = client.post(
+        "/v1/sync/tournaments", json=tournament_payload(), headers=legacy_headers
+    )
+    assert core.status_code == 201
+    tournament_id = core.json()["public_id"]
+    assert client.get("/v1/contributors", headers=legacy_headers).status_code == 403
+    me = client.get("/v1/me", headers=legacy_headers).json()
+    assert me["policy_version"] == "1"
+    assert me["opponent_tracking_required"] is True
+    upgraded = client.post(
+        "/v1/consent",
+        json={"consent": True, "policy_version": "2"},
+        headers=legacy_headers,
+    )
+    assert upgraded.status_code == 200
+    assert client.get("/v1/contributors", headers=legacy_headers).status_code == 403
+
+    raw_first = "SQLite-Plaintext-Canary"
+    raw_second = "Second Opponent"
+    payload = opponent_payload(raw_first, raw_second)
+    created = client.post(
+        f"/v1/sync/tournaments/{tournament_id}/opponents",
+        json=payload,
+        headers=legacy_headers,
+    )
+    assert created.status_code == 201, created.text
+    assert created.json() == {
+        "status": "created",
+        "opponent_count": 2,
+        "observation_count": 2,
+    }
+    repeated = client.post(
+        f"/v1/sync/tournaments/{tournament_id}/opponents",
+        json=payload,
+        headers=legacy_headers,
+    )
+    assert repeated.status_code == 200
+    assert repeated.json()["status"] == "existing"
+    changed = opponent_payload(raw_first + " changed", raw_second)
+    conflict = client.post(
+        f"/v1/sync/tournaments/{tournament_id}/opponents",
+        json=changed,
+        headers=legacy_headers,
+    )
+    assert conflict.status_code == 409
+    assert raw_first not in conflict.text
+    assert client.get("/v1/contributors", headers=legacy_headers).status_code == 200
+
+    listing = client.get("/v1/opponents?limit=50&offset=0", headers=legacy_headers)
+    assert listing.status_code == 200, listing.text
+    items = listing.json()["items"]
+    assert {item["display_name"] for item in items} == {raw_first, raw_second}
+    first = next(item for item in items if item["display_name"] == raw_first)
+    profile = client.get(
+        f"/v1/opponents/{first['public_id']}/profile", headers=legacy_headers
+    )
+    assert profile.status_code == 200, profile.text
+    data = profile.json()
+    assert data["identity"]["display_name"] == raw_first
+    assert data["summary"]["hands"] == 1
+    assert data["summary"]["net_chips"] == -20
+    assert data["summary"]["preflop_known_hands"] == 0
+    assert data["summary"]["vpip"] == {
+        "made": 0,
+        "opportunities": 0,
+        "percent": None,
+    }
+    assert data["summary"]["three_bet"]["opportunities"] == 0
+    assert data["summary"]["wtsd"]["opportunities"] == 1
+    assert data["recent_observations"][0]["net"] == -20
+    assert data["recent_observations"][0]["preflop_known"] is False
+    assert "final_rank" not in json.dumps(data)
+    assert "reward" not in json.dumps(data)
+
+    db = tracking_hub["database"].session()
+    stored = db.scalar(select(Opponent).where(Opponent.public_id == first["public_id"]))
+    assert stored is not None
+    assert raw_first.encode() not in stored.display_ciphertext
+    assert len(stored.display_nonce) == 12
+    db.close()
+    for path in (
+        tracking_hub["database"].database_path,
+        Path(str(tracking_hub["database"].database_path) + "-wal"),
+        Path(str(tracking_hub["database"].database_path) + "-shm"),
+    ):
+        if path.exists():
+            assert raw_first.encode() not in path.read_bytes()
+    assert raw_first not in caplog.text
+    wrong_config = get_hub_config(
+        {
+            "WXA_HUB_DATA_DIR": str(tracking_hub["config"].data_dir),
+            "WXA_HUB_OPPONENT_TRACKING": "YES",
+            "WXA_HUB_OPPONENT_IDENTITY_KEY": base64.b64encode(b"i" * 32).decode(),
+            "WXA_HUB_OPPONENT_ENCRYPTION_KEY": base64.b64encode(b"x" * 32).decode(),
+        }
+    )
+    with pytest.raises(ValueError, match="incompatible"):
+        create_hub_app(
+            tracking_hub["database"],
+            docs_enabled=False,
+            trusted_hosts=("testserver",),
+            interlock=AnalysisInterlock(),
+            hub_config=wrong_config,
+        )
+    verification_db = tracking_hub["database"].session()
+    assert int(verification_db.scalar(select(func.count(Opponent.id))) or 0) == 2
+    verification_db.close()
+
+
+def test_opponent_interlock_trip_before_commit_rolls_back_every_identity(tracking_hub):
+    enrolled = enroll_friend(tracking_hub, policy_version="2")
+    headers = auth(enrolled["device_token"])
+    core = tracking_hub["client"].post(
+        "/v1/sync/tournaments", json=tournament_payload(), headers=headers
+    ).json()
+    db = tracking_hub["database"].session()
+    member = db.scalar(select(Member).where(Member.public_id == enrolled["member_id"]))
+    assert member is not None
+    calls = 0
+
+    def trip_before_commit() -> None:
+        nonlocal calls
+        calls += 1
+        if calls >= 3:
+            raise AnalysisForbiddenError("synthetic safety trip")
+
+    request = OpponentSyncRequest.model_validate(opponent_payload())
+    with pytest.raises(HTTPException) as failure:
+        sync_tournament_opponents(
+            db,
+            member_id=member.id,
+            tournament_public_id=core["public_id"],
+            request=request,
+            identity_service=tracking_hub["app"].state.opponent_identity_service,
+            ensure_allowed=trip_before_commit,
+        )
+    assert failure.value.status_code == 503
+    assert int(db.scalar(select(func.count(Opponent.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(SharedTournamentOpponent.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(SharedOpponentObservation.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(OpponentSyncReceipt.id))) or 0) == 0
+    db.close()
+
+
+def test_opponent_enrichment_ownership_recency_and_name_errors_are_private(
+    tracking_hub, caplog
+):
+    alice = enroll_friend(tracking_hub, policy_version="2")
+    headers = auth(alice["device_token"])
+    core = tracking_hub["client"].post(
+        "/v1/sync/tournaments", json=tournament_payload(), headers=headers
+    ).json()
+    bob = enroll_additional_friend(tracking_hub, "Bob", policy_version="2")
+    bob_headers = auth(bob["device_token"])
+    bob_core = tournament_payload("b" * 64)
+    assert tracking_hub["client"].post(
+        "/v1/sync/tournaments", json=bob_core, headers=bob_headers
+    ).status_code == 201
+    stolen = tracking_hub["client"].post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload(),
+        headers=bob_headers,
+    )
+    assert stolen.status_code == 404
+
+    invalid_name = "Private-Name-Canary\u202e"
+    invalid = tracking_hub["client"].post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload(invalid_name, "Valid Name"),
+        headers=headers,
+    )
+    assert invalid.status_code == 422
+    assert "Private-Name-Canary" not in invalid.text
+    assert "Private-Name-Canary" not in caplog.text
+
+    db = tracking_hub["database"].session()
+    tournament = db.scalar(
+        select(SharedTournament)
+        .where(SharedTournament.public_id == core["public_id"])
+        .options(selectinload(SharedTournament.hands))
+    )
+    assert tournament is not None
+    recent = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=30)
+    tournament.ended_at = recent
+    for hand in tournament.hands:
+        hand.played_at = recent
+    db.commit()
+    db.close()
+    too_recent = tracking_hub["client"].post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload(),
+        headers=headers,
+    )
+    assert too_recent.status_code == 409
+
+
+def test_opponent_normalization_suppression_revocation_and_cascades(tracking_hub):
+    client = tracking_hub["client"]
+    alice = enroll_friend(tracking_hub, policy_version="2")
+    headers = auth(alice["device_token"])
+    core = client.post(
+        "/v1/sync/tournaments", json=tournament_payload(), headers=headers
+    ).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload("Alice", "Case Name"),
+        headers=headers,
+    ).status_code == 201
+    db = tracking_hub["database"].session()
+    # A contributor and an opponent with the same display value remain wholly
+    # separate models; there is no automatic identity link.
+    member = db.scalar(select(Member).where(Member.public_id == alice["member_id"]))
+    opponent = db.scalar(select(Opponent).order_by(Opponent.id))
+    assert member is not None and opponent is not None
+    assert not hasattr(opponent, "member_id")
+    opponent_id = opponent.public_id
+    db.close()
+
+    db = tracking_hub["database"].session()
+    suppress_opponent_by_public_id(db, public_id=opponent_id, confirmation="DELETE")
+    assert db.scalar(select(Opponent).where(Opponent.public_id == opponent_id)) is None
+    assert int(db.scalar(select(func.count(OpponentSuppression.id))) or 0) == 1
+    assert int(db.scalar(select(func.count(SharedTournamentOpponent.id))) or 0) == 1
+    assert int(db.scalar(select(func.count(SharedOpponentObservation.id))) or 0) == 1
+    db.close()
+
+    bob = enroll_additional_friend(tracking_hub, "Bob", policy_version="2")
+    bob_headers = auth(bob["device_token"])
+    bob_payload = tournament_payload("c" * 64)
+    bob_payload["tournament"]["started_at"] = datetime(
+        2025, 1, 4, 19, 0, tzinfo=UTC
+    ).isoformat()
+    bob_payload["tournament"]["ended_at"] = datetime(
+        2025, 1, 4, 19, 10, tzinfo=UTC
+    ).isoformat()
+    bob_payload["tournament"]["hands"][0]["played_at"] = datetime(
+        2025, 1, 4, 19, 1, tzinfo=UTC
+    ).isoformat()
+    bob_core = client.post(
+        "/v1/sync/tournaments", json=bob_payload, headers=bob_headers
+    ).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{bob_core['public_id']}/opponents",
+        json=opponent_payload("  ALICE  ", "Bob Unique"),
+        headers=bob_headers,
+    ).status_code == 201
+    db = tracking_hub["database"].session()
+    # The suppressed normalized HMAC cannot be recreated; only Bob Unique is new.
+    assert int(db.scalar(select(func.count(Opponent.id))) or 0) == 2
+    revoke(db, kind="member", public_id=bob["member_id"])
+    db.close()
+    visible = client.get("/v1/opponents", headers=headers).json()["items"]
+    assert all(item["display_name"] != "Bob Unique" for item in visible)
+
+
+def test_opponent_metrics_use_real_opportunities_and_aggregate_contributors(tracking_hub):
+    client = tracking_hub["client"]
+    alice = enroll_friend(tracking_hub, policy_version="2")
+    alice_headers = auth(alice["device_token"])
+    payload = tournament_payload("6" * 64)
+    payload["tournament"]["hands"][0]["players"][1].update(
+        {"showed": True, "is_winner": True, "won": 500, "net": 450}
+    )
+    payload["tournament"]["hands"][0]["actions"] = [
+        {"sequence": 1, "actor_alias": "OPPONENT_1", "street": "PREFLOP", "action_type": "POST_SB", "amount": 10, "to_amount": 10, "pot_after": 10, "is_all_in": False},
+        {"sequence": 2, "actor_alias": "OPPONENT_2", "street": "PREFLOP", "action_type": "POST_BB", "amount": 20, "to_amount": 20, "pot_after": 30, "is_all_in": False},
+        {"sequence": 3, "actor_alias": "HERO", "street": "PREFLOP", "action_type": "RAISE", "amount": 50, "to_amount": 50, "pot_after": 80, "is_all_in": False},
+        {"sequence": 4, "actor_alias": "OPPONENT_1", "street": "PREFLOP", "action_type": "RAISE", "amount": 140, "to_amount": 150, "pot_after": 220, "is_all_in": False},
+        {"sequence": 5, "actor_alias": "OPPONENT_2", "street": "PREFLOP", "action_type": "FOLD", "amount": None, "to_amount": None, "pot_after": 220, "is_all_in": False},
+        {"sequence": 6, "actor_alias": "HERO", "street": "PREFLOP", "action_type": "CALL", "amount": 100, "to_amount": 150, "pot_after": 320, "is_all_in": False},
+        {"sequence": 7, "actor_alias": "OPPONENT_1", "street": "FLOP", "action_type": "BET", "amount": 100, "to_amount": 100, "pot_after": 420, "is_all_in": False},
+        {"sequence": 8, "actor_alias": "HERO", "street": "FLOP", "action_type": "CALL", "amount": 100, "to_amount": 100, "pot_after": 520, "is_all_in": False},
+        {"sequence": 9, "actor_alias": "OPPONENT_1", "street": "TURN", "action_type": "CHECK", "amount": None, "to_amount": None, "pot_after": 520, "is_all_in": False},
+        {"sequence": 10, "actor_alias": "HERO", "street": "TURN", "action_type": "CHECK", "amount": None, "to_amount": None, "pot_after": 520, "is_all_in": False},
+        {"sequence": 11, "actor_alias": "OPPONENT_1", "street": "SHOWDOWN", "action_type": "SHOW", "amount": None, "to_amount": None, "pot_after": 520, "is_all_in": False},
+    ]
+    core = client.post("/v1/sync/tournaments", json=payload, headers=alice_headers).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload("Shared Identity", "Folded Identity"),
+        headers=alice_headers,
+    ).status_code == 201
+    listing = client.get("/v1/opponents", headers=alice_headers).json()["items"]
+    shared = next(item for item in listing if item["display_name"] == "Shared Identity")
+    folded = next(item for item in listing if item["display_name"] == "Folded Identity")
+    shared_profile = client.get(
+        f"/v1/opponents/{shared['public_id']}/profile", headers=alice_headers
+    ).json()
+    assert shared_profile["summary"]["vpip"] == {
+        "made": 1,
+        "opportunities": 1,
+        "percent": 100.0,
+    }
+    assert shared_profile["summary"]["preflop_known_hands"] == 1
+    assert shared_profile["summary"]["three_bet"] == {
+        "made": 1,
+        "opportunities": 1,
+        "percent": 100.0,
+    }
+    assert shared_profile["summary"]["aggression"] == {
+        "aggressive_actions": 1,
+        "calls": 0,
+        "checks": 1,
+        "folds": 0,
+        "opportunities": 2,
+        "frequency_percent": 50.0,
+        "factor": None,
+    }
+    folded_profile = client.get(
+        f"/v1/opponents/{folded['public_id']}/profile", headers=alice_headers
+    ).json()
+    assert folded_profile["summary"]["three_bet"]["opportunities"] == 1
+    assert folded_profile["summary"]["three_bet"]["made"] == 0
+
+    bob = enroll_additional_friend(tracking_hub, "Bob", policy_version="2")
+    bob_headers = auth(bob["device_token"])
+    bob_payload = tournament_payload("7" * 64)
+    started = datetime(2025, 1, 5, 19, 0, tzinfo=UTC)
+    bob_payload["tournament"]["started_at"] = started.isoformat()
+    bob_payload["tournament"]["ended_at"] = (started + timedelta(minutes=10)).isoformat()
+    bob_payload["tournament"]["hands"][0]["played_at"] = (
+        started + timedelta(minutes=1)
+    ).isoformat()
+    bob_core = client.post(
+        "/v1/sync/tournaments", json=bob_payload, headers=bob_headers
+    ).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{bob_core['public_id']}/opponents",
+        json=opponent_payload(" shared identity ", "Bob Other"),
+        headers=bob_headers,
+    ).status_code == 201
+    aggregated = client.get(
+        f"/v1/opponents/{shared['public_id']}/profile", headers=bob_headers
+    ).json()
+    assert aggregated["summary"]["contributors"] == 2
+    assert aggregated["summary"]["tournaments"] == 2
+    assert aggregated["summary"]["hands"] == 2
+
+
+def test_additive_hub_initialization_preserves_v1_rows(tmp_path):
+    database = HubDatabase(tmp_path / "legacy" / "community_hub.db")
+    database.initialize()
+    additive = {
+        "opponents",
+        "opponent_suppressions",
+        "opponent_sync_receipts",
+        "shared_tournament_opponents",
+        "shared_opponent_observations",
+    }
+    with database.engine.begin() as connection:
+        for table in (
+            "shared_opponent_observations",
+            "shared_tournament_opponents",
+            "opponent_sync_receipts",
+            "opponent_suppressions",
+            "opponents",
+        ):
+            connection.execute(text(f"DROP TABLE {table}"))
+        connection.execute(
+            text(
+                "INSERT INTO members "
+                "(public_id,display_name,display_name_key,role,policy_version,consented_at,created_at) "
+                "VALUES ('legacy-id','Legacy','legacy-key','member','1',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+            )
+        )
+    database.initialize()
+    db = database.session()
+    assert db.scalar(select(Member.display_name).where(Member.public_id == "legacy-id")) == "Legacy"
+    names = set(database.engine.dialect.get_table_names(db.connection()))
+    assert additive <= names
+    db.close()
+    database.dispose()
+
+
+def test_member_deletion_purges_orphan_opponents_and_retention_is_explicit(tracking_hub):
+    client = tracking_hub["client"]
+    alice = enroll_friend(tracking_hub, policy_version="2")
+    headers = auth(alice["device_token"])
+    core = client.post(
+        "/v1/sync/tournaments", json=tournament_payload(), headers=headers
+    ).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{core['public_id']}/opponents",
+        json=opponent_payload("Retention A", "Retention B"),
+        headers=headers,
+    ).status_code == 201
+    db = tracking_hub["database"].session()
+    for opponent in db.scalars(select(Opponent)):
+        opponent.last_seen_at = datetime(2020, 1, 1)
+    db.commit()
+    assert purge_opponents(db, retention_days=365) == 2
+    assert int(db.scalar(select(func.count(SharedTournamentOpponent.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(SharedOpponentObservation.id))) or 0) == 0
+    # Retention is not an opt-out: it does not add permanent tombstones.
+    assert int(db.scalar(select(func.count(OpponentSuppression.id))) or 0) == 0
+    db.close()
+
+    # Recreate identities on a fresh tournament, then deleting the sole source
+    # must also remove the now-orphaned global identities.
+    second = tournament_payload("8" * 64)
+    started = datetime(2025, 1, 6, 19, 0, tzinfo=UTC)
+    second["tournament"]["started_at"] = started.isoformat()
+    second["tournament"]["ended_at"] = (started + timedelta(minutes=10)).isoformat()
+    second["tournament"]["hands"][0]["played_at"] = (
+        started + timedelta(minutes=1)
+    ).isoformat()
+    second_core = client.post(
+        "/v1/sync/tournaments", json=second, headers=headers
+    ).json()
+    assert client.post(
+        f"/v1/sync/tournaments/{second_core['public_id']}/opponents",
+        json=opponent_payload("Delete A", "Delete B"),
+        headers=headers,
+    ).status_code == 201
+    db = tracking_hub["database"].session()
+    delete_member(db, public_id=alice["member_id"], confirmation="DELETE")
+    assert int(db.scalar(select(func.count(Opponent.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(SharedTournamentOpponent.id))) or 0) == 0
+    assert int(db.scalar(select(func.count(SharedOpponentObservation.id))) or 0) == 0
+    db.close()
+
+
 def test_real_local_serializer_matches_hub_contract(db, hub):
     settings = AnalyzerSettings(history_paths=[], hero_name="HERO")
     save_settings(db, settings)
@@ -821,6 +1430,67 @@ def test_real_client_reenrollment_does_not_duplicate_history(db, hub):
     same_member = hub_db.scalar(select(Member).where(Member.public_id == member_public_id))
     assert same_member is not None
     hub_db.close()
+
+
+def test_real_local_client_delivers_separate_opponent_enrichment_end_to_end(
+    db, tracking_hub
+):
+    settings = AnalyzerSettings(history_paths=[], hero_name="HERO")
+    save_settings(db, settings)
+    assert import_pair(
+        db,
+        FIXTURES / "expresso_synthetic_hands.txt",
+        FIXTURES / "expresso_synthetic_summary.txt",
+        settings,
+        datetime(2030, 1, 1, 12, 0, tzinfo=UTC),
+    ) == "imported"
+
+    def bridge(request: httpx.Request) -> httpx.Response:
+        target = request.url.path
+        if request.url.query:
+            target += "?" + request.url.query.decode("ascii")
+        upstream = tracking_hub["client"].request(
+            request.method,
+            target,
+            headers=dict(request.headers),
+            content=request.content,
+        )
+        return httpx.Response(
+            upstream.status_code,
+            headers=dict(upstream.headers),
+            content=upstream.content,
+        )
+
+    store = MemoryCommunitySecretStore()
+    community = CommunityClient(
+        secret_store=store,
+        transport=httpx.MockTransport(bridge),
+    )
+    joined = community.join(
+        db,
+        CommunityJoinRequest(
+            hub_url="http://localhost",
+            invite=tracking_hub["invite_token"],
+            display_name="Alice",
+            consent=True,
+            consent_version="2",
+        ),
+    )
+    assert joined["pending"] == 1
+    result = community.sync(db)
+    assert result.queued == 1
+    assert result.synced == 2
+    assert result.pending == 0
+    assert result.available is True
+    listing = community.proxy_get(db, "/v1/opponents")
+    assert listing["total"] == 2
+    assert all(item["display_name"] for item in listing["items"])
+    hub_db = tracking_hub["database"].session()
+    assert int(hub_db.scalar(select(func.count(Opponent.id))) or 0) == 2
+    assert int(hub_db.scalar(select(func.count(SharedTournament.id))) or 0) == 1
+    assert int(hub_db.scalar(select(func.count(SharedOpponentObservation.id))) or 0) == 12
+    hub_db.close()
+    assert community.leave(db) is True
 
 
 def test_server_rejects_recent_tournament_and_recent_hand(hub):
@@ -1156,8 +1826,32 @@ def test_runner_guard_precedes_database_initialization(tmp_path):
     assert not (tmp_path / "must-not-exist").exists()
 
 
+def test_runner_rejects_missing_opponent_keys_before_database_initialization(tmp_path):
+    database_called = False
+
+    def forbidden_database(_path):
+        nonlocal database_called
+        database_called = True
+        raise AssertionError("database must not be constructed")
+
+    target = tmp_path / "missing-opponent-keys"
+    exit_code = run(
+        [],
+        environ={
+            **APPROVAL_ENV,
+            "WXA_HUB_DATA_DIR": str(target),
+            "WXA_HUB_OPPONENT_TRACKING": "YES",
+        },
+        detector=lambda: False,
+        database_factory=forbidden_database,
+    )
+    assert exit_code == 2
+    assert not database_called
+    assert not target.exists()
+
+
 def test_runtime_guard_requests_server_shutdown_without_restart(tmp_path):
-    probe_results = iter((False, False, False, False, True))
+    probe_results = iter((False, False, False, False, False, True))
     servers = []
     configs = []
 

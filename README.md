@@ -1,6 +1,6 @@
 # Winamax Expresso Analyzer
 
-Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur un serveur contrôlé par l’hôte — PC ou VPS — et de consulter une fiche statistique globale par contributeur consentant.
+Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur un serveur contrôlé par l’hôte — PC ou VPS — et de consulter des fiches statistiques globales pour les contributeurs ainsi que les adversaires observés.
 
 Projet indépendant, non affilié à Winamax.
 
@@ -77,7 +77,7 @@ L’import est idempotent grâce à SHA-256, l’identifiant externe du tournoi,
 - **Replayer** : ouverture manuelle uniquement, table, stacks, board, pot et actions pas à pas.
 - **Sessions** : regroupement après 30 minutes d’inactivité par défaut.
 - **Leaks** : règles explicables, seuil, échantillon, sévérité, confiance et recommandation générale.
-- **Communauté** : appairage explicite, synchronisation obligatoire des parties terminées, indicateurs communs, fiche globale par contributeur consentant, listes filtrées de parties et mains, et replayer partagé en lecture seule.
+- **Communauté** : appairage explicite, synchronisation obligatoire des parties terminées, fiches globales des contributeurs, suivi adverse post-session, listes filtrées de parties et mains, et replayer partagé en lecture seule.
 - **Paramètres** : source, sécurité, sauvegarde, export et options locales.
 
 ## Formules
@@ -142,20 +142,22 @@ Cette attestation est locale, n’est ni envoyée ni publiée et ne remplace pas
 
 Après appairage et consentement, l’envoi est obligatoire pour accéder aux données communes. Le client met en file les tournois Expresso confirmés terminés, tente la synchronisation en arrière-plan lorsque Winamax est absent et bloque toutes les vues partagées tant qu’un envoi local reste en attente. Le hub exige lui-même au moins une contribution avant d’autoriser la consultation.
 
-La liste blanche contient les dates de début/fin, buy-in, multiplicateur, prize pool, récompense, classement, stacks, chip delta et mains terminées avec positions, montants, cartes du héros, board, actions et cartes adverses uniquement lorsqu’elles ont réellement été révélées. Elle exclut :
+La liste blanche principale contient les dates de début/fin, buy-in, multiplicateur, prize pool, récompense, classement, stacks, chip delta et mains terminées avec positions, montants, cartes du héros, board, actions et cartes adverses uniquement lorsqu’elles ont réellement été révélées. Un enrichissement v2 séparé transmet une seule fois par tournoi la correspondance entre `OPPONENT_n` et le pseudo observé. Elle exclut :
 
 - identifiants Winamax et SQLite, chemins, noms de fichiers et hash des sources ;
-- pseudo Winamax du héros, pseudos adverses, empreintes de noms et alias persistants ;
+- pseudo Winamax du héros, identifiants de compte, empreintes locales et alias fournis par le client comme identités globales ;
 - notes, tags, tickets, diagnostics et textes libres ;
 - paramètres, sauvegardes, cookies, mots de passe et clés API.
 
-Le contributeur est identifié uniquement par le nom d’affichage choisi lors de l’appairage. Le héros devient `HERO`; les adversaires deviennent `OPPONENT_1`, `OPPONENT_2`, etc., avec une correspondance limitée au tournoi.
+Le contributeur est identifié uniquement par le nom d’affichage choisi lors de l’appairage. Le héros devient `HERO`; dans les mains et replayers, les adversaires restent `OPPONENT_1`, `OPPONENT_2`, etc., avec une correspondance limitée au tournoi.
 
 Chaque membre actif dispose d’une fiche globale rattachée à son UUID de consentement. Elle consolide ses volumes, résultats, ROI, places, ITM, moyennes, chipEV disponible, évolution quotidienne, limites, multiplicateurs et tournois récents. Un réappairage ciblé sur un nouveau PC conserve la même fiche. La révocation masque immédiatement le membre et sa fiche de toutes les vues collectives.
 
-Cette fiche ne contient aucune structure de main, aucun replayer, aucun pseudo Winamax et aucun alias adverse. Les alias `OPPONENT_n` sont recréés indépendamment dans chaque tournoi et ne possèdent ni identifiant global, ni empreinte, ni table de correspondance. Le suivi persistant concerne donc exclusivement les **contributeurs consentants**.
+La fiche d’un contributeur ne contient aucune identité adverse. Le suivi adverse est exposé dans une vue distincte : le hub normalise le pseudo, calcule une identité stable avec une clé HMAC privée, chiffre le nom affichable avec AES-256-GCM puis matérialise uniquement des observations factuelles. Il fournit volume, positions, profondeurs, VPIP, PFR, limp, 3-bet, shove, agressivité, all-in et showdown avec numérateurs et dénominateurs. Une décision préflop absente ou inconnue réduit explicitement la couverture au lieu de devenir un faux zéro. Il ne calcule ni ROI adverse, ni range supposée, ni étiquette de niveau.
 
-L’objectif à terme est que l’hôte puisse utiliser ce corpus de parties terminées et consenties pour améliorer la compatibilité du parser, les statistiques agrégées et le suivi global des membres. La version actuelle ne lance toutefois aucun entraînement, aucune analyse cloud et aucune republication automatique : elle collecte, stocke et expose les données au groupe privé uniquement.
+La politique communautaire v2 est obligatoire pour cette fonction. Un membre déjà inscrit doit l’accepter explicitement avant tout enrichissement et toutes les vues communes restent bloquées tant que sa file adverse n’est pas synchronisée. La finalité, le chiffrement, la rétention et la suppression sont détaillés dans [la politique du suivi adverse](docs/OPPONENT_DATA_POLICY.md).
+
+L’objectif à terme est que l’hôte puisse utiliser ce corpus de parties terminées pour améliorer la compatibilité du parser et les statistiques agrégées des membres et adversaires observés. La version actuelle ne lance toutefois aucun entraînement, aucune analyse cloud et aucune republication automatique : elle collecte, stocke et expose les données au groupe privé uniquement.
 
 Cette pseudonymisation n’est pas un anonymat : dates exactes, cartes, séquences, montants et résultats peuvent être fortement corrélables entre eux ou avec d’autres informations. Les membres du groupe et l’administrateur du hub doivent traiter cette base comme une donnée privée sensible et ne pas la republier.
 
@@ -165,6 +167,7 @@ Cette pseudonymisation n’est pas un anonymat : dates exactes, cartes, séquenc
 - une file technique locale garde l’état des envois, sans dupliquer les payloads ni le jeton en clair ;
 - le jeton du hub est protégé par Windows DPAPI et n’est jamais donné à React ou stocké dans `localStorage` ;
 - les données communautaires persistantes sont stockées uniquement dans le répertoire configuré du serveur hôte (`hub-data\community_hub.db` sous Windows, `~/riverscope-hub/data/community_hub.db` avec le déploiement VPS fourni) ;
+- les pseudos adverses persistants sont chiffrés dans cette base ; les clés HMAC et AES restent exclusivement dans l’environnement privé du hub et doivent être sauvegardées séparément ;
 - les réponses consultées par les membres transitent en mémoire via leur backend local avec `Cache-Control: no-store` et ne sont pas recopiées dans leur SQLite.
 
 « Stockage central uniquement sur le serveur choisi par l’hôte » ne signifie donc pas que les fichiers sources disparaissent des PC contributeurs. Le hub ne transmet les données à aucun autre service applicatif et n’ajoute aucune télémétrie. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots restent nécessairement dans le périmètre de l’hébergeur : les membres doivent en être informés avant de consentir.
@@ -220,7 +223,7 @@ Des limites de débit en mémoire protègent séparément l’enrôlement, la sy
 
 ### Rejoindre depuis un PC membre
 
-Lorsque Winamax est fermé, démarrer l’analyseur local sur `http://127.0.0.1:8000`, ouvrir **Communauté**, puis saisir l’URL HTTPS du hub, l’invitation à usage unique et un nom d’affichage. L’écran expose clairement que l’envoi des nouvelles parties terminées devient obligatoire. Une alternative en terminal est disponible :
+Lorsque Winamax est fermé, démarrer l’analyseur local sur `http://127.0.0.1:8000`, ouvrir **Communauté**, puis saisir l’URL HTTPS du hub, l’invitation à usage unique et un nom d’affichage. L’écran expose clairement que l’envoi des nouvelles parties terminées et des pseudos adverses observés devient obligatoire selon la politique v2. Une alternative en terminal est disponible :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\community-join.ps1 -HubUrl "https://hub.exemple.fr:8040" -DisplayName "Alice"
@@ -238,7 +241,7 @@ Ces garanties décrivent le client et le hub officiels de ce dépôt. Comme le c
 powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 ```
 
-La validation locale courante compte **115 tests réussis sous Windows et 3 tests Linux ignorés sur cette plateforme**. La CI publique rejoue toute la suite sous Windows et Ubuntu ; les cas Linux vérifient en plus la lecture minimale de `/proc`, la visibilité inter-utilisateurs et l’échec fermé. La couverture inclut parser/résumé, incomplet, CP1252, doublons, réimport, garde temporelle, interverrouillage `Winamax.exe`, export agrégé et canaris privés, export CSV minimisé, VPIP/PFR/3-bet, ROI/ITM/chipEV, sessions, équité, API et base vide, ainsi que client/hub, consentement, invitations, authentification, idempotence inter-appareils, révocation, quotas, limitation de débit, filtre contributeur, confidentialité, garde 60 secondes, TLS, DPAPI, protections navigateur et contrat replayer.
+La validation locale courante compte **143 tests réussis sous Windows et 3 tests Linux ignorés sur cette plateforme**. La CI publique rejoue toute la suite sous Windows et Ubuntu ; les cas Linux vérifient en plus la lecture minimale de `/proc`, la visibilité inter-utilisateurs et l’échec fermé. La couverture inclut parser/résumé, incomplet, CP1252, doublons, réimport, garde temporelle, interverrouillage `Winamax.exe`, export agrégé et canaris privés, export CSV minimisé, VPIP/PFR/3-bet, ROI/ITM/chipEV, sessions, équité, API et base vide, ainsi que client/hub, consentement v2, invitations, authentification, idempotence inter-appareils, chiffrement adverse, absence de pseudo en clair dans SQLite/WAL/SHM, suppression anti-recréation, rétention, migration additive, révocation, quotas, limitation de débit, filtres contributeur/adversaire, confidentialité, garde 60 secondes, TLS, DPAPI, protections navigateur et contrat replayer.
 
 ## Limites connues
 
@@ -250,6 +253,11 @@ La validation locale courante compte **115 tests réussis sous Windows et 3 test
 - Les recommandations sont pédagogiques et générales; elles ne remplacent pas une analyse de range contextualisée.
 - Le hub SQLite vise un groupe privé de taille modérée. Certificat, nom DNS éventuel, pare-feu, sauvegarde de la base et disponibilité du serveur hôte restent à administrer manuellement. Un VPS implique également les conditions de stockage et de sauvegarde de son hébergeur.
 - Le hub devient volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent leur file locale jusqu’au prochain lancement manuel autorisé.
+- Le chiffrement des pseudos adverses est une pseudonymisation, pas une anonymisation. L’hôte doit définir sa base légale, sa transparence, sa rétention et son canal d’opposition/suppression avant un usage élargi.
+- La perte des clés privées du suivi adverse rend les pseudos chiffrés illisibles ; une sauvegarde SQLite seule ne suffit donc pas.
+- La rotation HMAC/AES n’est pas automatisée. La clé HMAC ne doit jamais être remplacée sans migrer aussi les identités et les empreintes d’opposition ; une rotation AES exige le rechiffrement de tous les pseudos.
+- Une correction locale d’un pseudo déjà enrichi est détectée et bloquée par un conflit explicite ; cette version n’expose pas encore de workflow administratif de remplacement contrôlé.
+- Une fiche adverse agrège actuellement en mémoire toutes les observations accessibles de cette identité. Un corpus à très grande échelle nécessitera des agrégats SQL matérialisés ou incrémentaux.
 - La détection de `Winamax.exe` est sondée toutes les 250 ms. Une requête post-session déjà en vol peut finir pendant cette très courte fenêtre; son payload a déjà été limité à des tournois confirmés terminés et aucune donnée de la nouvelle partie n’est lue.
 - L’API du hub expose le détail d’un tournoi, mais l’interface communautaire actuelle reste une vue en lecture seule composée des tableaux Parties/Mains et du replayer. Elle n’affiche pas encore une page de détail communautaire équivalente à la page locale.
 - Les classifications, profondeurs calculées et annotations restent locales et ne sont pas partagées. Le replayer communautaire anime les actions, le pot et les rues, mais conserve des stacks statiques faute de champ `stack_after` et ne rend pas encore les cartes adverses révélées autour de la table.

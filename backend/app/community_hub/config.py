@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+import base64
+import binascii
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -17,6 +19,7 @@ DEFAULT_RATE_LIMIT_ENROLL_PER_MINUTE = 10
 DEFAULT_RATE_LIMIT_SYNC_PER_MINUTE = 20
 DEFAULT_RATE_LIMIT_OTHER_PER_MINUTE = 240
 DEFAULT_RATE_LIMIT_MAX_BUCKETS = 10_000
+DEFAULT_OPPONENT_RETENTION_DAYS = 365
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,11 @@ class HubConfig:
     rate_limit_sync_per_minute: int
     rate_limit_other_per_minute: int
     rate_limit_max_buckets: int
+    opponent_tracking_enabled: bool
+    opponent_identity_key: bytes | None = field(repr=False)
+    opponent_encryption_key: bytes | None = field(repr=False)
+    opponent_key_version: int
+    opponent_retention_days: int
 
 
 def _positive_int(env: dict[str, str] | os._Environ[str], name: str, default: int) -> int:
@@ -53,6 +61,17 @@ def _contains_cloud_directory(value: str | Path) -> bool:
         part.casefold() in cloud_parts or part.casefold().startswith("onedrive -")
         for part in parts
     )
+
+
+def _secret_key(env: dict[str, str] | os._Environ[str], name: str) -> bytes:
+    raw = env.get(name, "")
+    try:
+        value = base64.b64decode(raw, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError(f"{name} doit etre une cle base64 valide de 32 octets.") from exc
+    if len(value) != 32:
+        raise ValueError(f"{name} doit etre une cle base64 valide de 32 octets.")
+    return value
 
 
 def get_hub_config(environ: dict[str, str] | os._Environ[str] | None = None) -> HubConfig:
@@ -79,6 +98,24 @@ def get_hub_config(environ: dict[str, str] | os._Environ[str] | None = None) -> 
         raise ValueError("WXA_HUB_TRUSTED_HOSTS exige des noms exacts, sans wildcard.")
     defaults = (host, "127.0.0.1", "localhost", "[::1]", "testserver")
     trusted_hosts = tuple(dict.fromkeys((*configured_hosts, *defaults)))
+    opponent_tracking_enabled = env.get("WXA_HUB_OPPONENT_TRACKING") == "YES"
+    opponent_identity_key = (
+        _secret_key(env, "WXA_HUB_OPPONENT_IDENTITY_KEY")
+        if opponent_tracking_enabled
+        else None
+    )
+    opponent_encryption_key = (
+        _secret_key(env, "WXA_HUB_OPPONENT_ENCRYPTION_KEY")
+        if opponent_tracking_enabled
+        else None
+    )
+    if (
+        opponent_tracking_enabled
+        and opponent_identity_key == opponent_encryption_key
+    ):
+        raise ValueError(
+            "Les cles d'identite et de chiffrement adverses doivent etre distinctes."
+        )
     return HubConfig(
         data_dir=data_dir,
         database_path=data_dir / "community_hub.db",
@@ -125,5 +162,14 @@ def get_hub_config(environ: dict[str, str] | os._Environ[str] | None = None) -> 
             env,
             "WXA_HUB_RATE_LIMIT_MAX_BUCKETS",
             DEFAULT_RATE_LIMIT_MAX_BUCKETS,
+        ),
+        opponent_tracking_enabled=opponent_tracking_enabled,
+        opponent_identity_key=opponent_identity_key,
+        opponent_encryption_key=opponent_encryption_key,
+        opponent_key_version=_positive_int(env, "WXA_HUB_OPPONENT_KEY_VERSION", 1),
+        opponent_retention_days=_positive_int(
+            env,
+            "WXA_HUB_OPPONENT_RETENTION_DAYS",
+            DEFAULT_OPPONENT_RETENTION_DAYS,
         ),
     )

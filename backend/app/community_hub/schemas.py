@@ -12,8 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 StrictText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Card = Annotated[str, StringConstraints(pattern=r"^[2-9TJQKA][cdhs]$")]
 ClientKey = Annotated[str, StringConstraints(pattern=r"^[0-9a-fA-F]{64}$")]
-OpponentAlias = Annotated[str, StringConstraints(pattern=r"^OPPONENT_[1-9][0-9]*$")]
-PlayerAlias = Annotated[str, StringConstraints(pattern=r"^(HERO|OPPONENT_[1-9][0-9]*)$")]
+OpponentAlias = Annotated[str, StringConstraints(pattern=r"^OPPONENT_[12]$")]
+PlayerAlias = Annotated[str, StringConstraints(pattern=r"^(HERO|OPPONENT_[12])$")]
 
 
 class StrictModel(BaseModel):
@@ -24,7 +24,7 @@ class EnrollRequest(StrictModel):
     invite_token: Annotated[str, StringConstraints(min_length=32, max_length=160)]
     display_name: Annotated[str, StringConstraints(min_length=2, max_length=80)]
     device_label: Annotated[str, StringConstraints(min_length=2, max_length=80)]
-    policy_version: Literal["1"]
+    policy_version: Literal["1", "2"]
     consent: Literal[True]
 
     @field_validator("display_name", "device_label")
@@ -43,7 +43,7 @@ class EnrollResponse(StrictModel):
     device_id: str
     device_token: str
     display_name: str
-    policy_version: Literal["1"]
+    policy_version: Literal["1", "2"]
 
 
 class ReplayPlayer(StrictModel):
@@ -192,6 +192,146 @@ class SyncTournamentResponse(StrictModel):
     hand_count: int
 
 
+class ConsentUpgradeRequest(StrictModel):
+    consent: Literal[True]
+    policy_version: Literal["2"]
+
+
+class ConsentUpgradeResponse(StrictModel):
+    policy_version: Literal["2"]
+    opponent_tracking_enabled: Literal[True]
+
+
+class OpponentTournamentInput(StrictModel):
+    alias: Annotated[str, StringConstraints(pattern=r"^OPPONENT_[12]$")]
+    display_name: Annotated[str, StringConstraints(min_length=1, max_length=200)] = Field(
+        repr=False
+    )
+    final_rank: int | None = Field(default=None, ge=1, le=3)
+    reward: Decimal | None = Field(default=None, ge=0, le=100_000_000)
+    starting_stack: int | None = Field(default=None, ge=0, le=100_000_000)
+    final_stack: int | None = Field(default=None, ge=0, le=100_000_000)
+
+
+class OpponentSyncRequest(StrictModel):
+    schema_version: Literal["1"]
+    opponents: list[OpponentTournamentInput] = Field(max_length=2)
+
+    @model_validator(mode="after")
+    def aliases_are_unique(self) -> "OpponentSyncRequest":
+        aliases = [opponent.alias for opponent in self.opponents]
+        if len(aliases) != len(set(aliases)):
+            raise ValueError("Alias adverse duplique.")
+        if aliases != sorted(aliases):
+            raise ValueError("Les alias adverses doivent etre ordonnes.")
+        return self
+
+
+class OpponentSyncResponse(StrictModel):
+    status: Literal["created", "existing"]
+    opponent_count: int
+    observation_count: int
+
+
+class OpponentListItem(StrictModel):
+    public_id: str
+    display_name: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+    tournaments: int
+    hands: int
+    contributors: int
+
+
+class OpponentListResponse(StrictModel):
+    items: list[OpponentListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class OpponentRateStat(StrictModel):
+    made: int
+    opportunities: int
+    percent: float | None
+
+
+class OpponentAggressionStat(StrictModel):
+    aggressive_actions: int
+    calls: int
+    checks: int
+    folds: int
+    opportunities: int
+    frequency_percent: float | None
+    factor: float | None
+
+
+class OpponentProfileMetrics(StrictModel):
+    tournaments: int
+    hands: int
+    contributors: int
+    net_chips: int
+    known_net_hands: int
+    preflop_known_hands: int
+    vpip: OpponentRateStat
+    pfr: OpponentRateStat
+    limp: OpponentRateStat
+    three_bet: OpponentRateStat
+    shove: OpponentRateStat
+    aggression: OpponentAggressionStat
+    wtsd: OpponentRateStat
+    wsd: OpponentRateStat
+    all_in: OpponentRateStat
+
+
+class OpponentProfileIdentity(StrictModel):
+    public_id: str
+    display_name: str
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+class OpponentProfileBreakdown(OpponentProfileMetrics):
+    position: str | None = None
+    bucket: str | None = None
+
+
+class OpponentRecentObservation(StrictModel):
+    hand_id: str
+    tournament_id: str
+    played_at: datetime
+    position: str | None
+    stack_bb: float | None
+    invested: int
+    won: int
+    net: int | None
+    showed: bool
+    is_winner: bool
+    is_all_in: bool
+    preflop_known: bool
+    vpip: bool
+    pfr: bool
+    limp: bool
+    faced_open: bool
+    three_bet: bool
+    shove: bool
+    postflop_aggressive_actions: int
+    postflop_calls: int
+    postflop_checks: int
+    postflop_folds: int
+    saw_flop: bool
+    went_showdown: bool
+    won_showdown: bool
+
+
+class OpponentProfileResponse(StrictModel):
+    identity: OpponentProfileIdentity
+    summary: OpponentProfileMetrics
+    by_position: list[OpponentProfileBreakdown]
+    by_depth: list[OpponentProfileBreakdown]
+    recent_observations: list[OpponentRecentObservation] = Field(max_length=20)
+
+
 class ContributorProfileIdentity(StrictModel):
     public_id: str
     display_name: str
@@ -286,4 +426,4 @@ class ContributorProfileResponse(StrictModel):
 
 
 def is_opponent_alias(value: str) -> bool:
-    return bool(re.fullmatch(r"OPPONENT_[1-9][0-9]*", value))
+    return bool(re.fullmatch(r"OPPONENT_[12]", value))
