@@ -132,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 Résultat validé :
 
 ```text
-115 passed, 3 skipped in 12.29s  # Windows local
+115 passed, 3 skipped in 11.61s  # Windows local
 ```
 
 Couverture fonctionnelle :
@@ -167,6 +167,24 @@ Les tests utilisent des détecteurs injectés et des composants simulés pour v�
 ## Vérification visuelle
 
 L’interface desktop et mobile est vérifiée avec des données synthétiques. Les captures publiables ne doivent afficher ni données de compte, ni chemins locaux, ni identifiants Winamax, ni résultats réels.
+
+Une validation fonctionnelle privée a aussi été réalisée le 11 juillet 2026 sur l’interface réellement alimentée : tableau de bord, filtre par contributeur, listes paginées des parties et mains, replayer communautaire pseudonymisé et message d’équité non calculable. Cette vérification a révélé puis fait corriger la navigation lorsque certaines rues n’ont aucune action : le bouton passe désormais uniquement par les rues présentes. Aucune capture contenant des résultats réels n’est publiée.
+
+## Validation opérationnelle du hub VPS
+
+Le déploiement sans privilèges a été validé le 11 juillet 2026 sur l’hôte déclaré `vps-6291e853.vps.ovh.net`, avec TLS sur le port `8040` et données persistantes sous le seul compte système de l’hôte :
+
+- dépôt public MIT déployé depuis la branche `main` ;
+- accès TLS accepté uniquement avec l’autorité privée distribuée aux membres et route `/docs` désactivée ;
+- garde de démarrage testée avec un processus factice nommé exactement `Winamax.exe` : refus avant écoute avec le code `23` ;
+- garde d’exécution testée : arrêt du hub, fermeture du port, absence de relance après disparition du processus, puis redémarrage manuel ;
+- contrôle SQLite `integrity_check` à `ok` ;
+- 193 tournois terminés et 1 485 mains synchronisés, sans invitation inutilisée après l’appairage initial ;
+- sauvegarde SQLite cohérente créée dans le répertoire privé `backups` ;
+- endpoint externe non authentifié vérifié : réponse `401`, sans exposition des données ;
+- CI GitHub validée sous Windows et Ubuntu, avec build frontend et test de cycle de vie du lanceur VPS.
+
+Les identifiants de membres, jetons d’invitation, secrets de périphériques, clé TLS et données financières réelles sont volontairement exclus de ce rapport et du dépôt public.
 
 ## Sécurité et confidentialité
 
