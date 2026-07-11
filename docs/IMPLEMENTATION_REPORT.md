@@ -187,7 +187,10 @@ Le déploiement sans privilèges a été validé le 11 juillet 2026 sur l’hôt
 - garde de démarrage testée avec un processus factice nommé exactement `Winamax.exe` : refus avant écoute avec le code `23` ;
 - garde d’exécution testée : arrêt du hub, fermeture du port, absence de relance après disparition du processus, puis redémarrage manuel ;
 - contrôle SQLite `integrity_check` à `ok` ;
-- 193 tournois terminés et 1 485 mains synchronisés, sans invitation inutilisée après l’appairage initial ;
+- corpus privé de tournois et mains terminés entièrement synchronisé, sans invitation inutilisée après l’appairage initial ;
+- migration de la politique v1 vers le consentement v2 validée, avec un reçu adverse pour chaque tournoi partagé et une file locale revenue à zéro ;
+- identités adverses HMAC, pseudos AES-256-GCM, nonces de 12 octets et absence de colonne de pseudo en clair contrôlés sur la base réellement migrée ;
+- listes paginées et profils adverses validés dans un navigateur réel, sans conserver ni publier de capture contenant les pseudos ou résultats observés ;
 - sauvegarde SQLite cohérente créée dans le répertoire privé `backups` ;
 - endpoint externe non authentifié vérifié : réponse `401`, sans exposition des données ;
 - CI GitHub validée sous Windows et Ubuntu, avec build frontend et test de cycle de vie du lanceur VPS.
