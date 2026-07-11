@@ -32,17 +32,26 @@ remove_stale_pid_file
 
 log_file="$(mktemp -- "$LOGS_DIR/hub-$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX.log")"
 chmod 600 -- "$log_file"
+lock_ready_file="$(mktemp -- "$RUN_DIR/hub.lock-ready.XXXXXXXX")"
+chmod 600 -- "$lock_ready_file"
+cleanup_ready_file() {
+    rm -f -- "$lock_ready_file"
+}
+trap cleanup_ready_file EXIT
 
 cd -- "$REPOSITORY_DIR"
 nohup bash -c '
     control_fd="$1"
     lock_file="$2"
-    shift 2
-    exec {control_fd}>&-
+    ready_file="$3"
+    shift 3
+    [[ "$control_fd" =~ ^[0-9]+$ ]] || exit 74
+    eval "exec ${control_fd}>&-"
     exec 9>"$lock_file"
     flock -n 9 || exit 73
+    printf "locked\n" > "$ready_file"
     exec "$@"
-' riverscope-hub "$control_fd" "$HUB_LOCK_FILE" \
+' riverscope-hub "$control_fd" "$HUB_LOCK_FILE" "$lock_ready_file" \
     "$python_bin" -m app.community_hub.runner \
     --host "$WXA_HUB_HOST" \
     --port "$WXA_HUB_PORT" \
@@ -69,7 +78,7 @@ fi
 
 lock_acquired=0
 for _attempt in {1..30}; do
-    if server_lock_is_held; then
+    if grep -Fxq "locked" "$lock_ready_file" 2>/dev/null; then
         lock_acquired=1
         break
     fi
@@ -84,6 +93,19 @@ if [[ "$lock_acquired" -ne 1 ]]; then
     printf 'Hub sans verrou fiable (code %s). Journal: %s\n' "$exit_code" "$log_file" >&2
     exit "$exit_code"
 fi
+if ! server_lock_is_held; then
+    kill -TERM "$hub_pid" 2>/dev/null || true
+    set +e
+    wait "$hub_pid"
+    exit_code=$?
+    set -e
+    [[ "$exit_code" -ne 0 ]] || exit_code=73
+    printf 'Hub sans verrou actif après acquittement (code %s). Journal: %s\n' \
+        "$exit_code" "$log_file" >&2
+    exit "$exit_code"
+fi
+cleanup_ready_file
+trap - EXIT
 
 pid_tmp="$(mktemp -- "$RUN_DIR/hub.pid.XXXXXXXX")"
 printf '%s %s\n' "$hub_pid" "$start_ticks" > "$pid_tmp"
