@@ -20,10 +20,13 @@ mkdir -p -- \
     "$RIVERSCOPE_HOME/secrets"
 chmod 700 -- "$RIVERSCOPE_HOME" "$RIVERSCOPE_HOME"/*
 
-for certificate in community-ca.crt server.crt server.key; do
-    : > "$RIVERSCOPE_HOME/certs/$certificate"
-    chmod 600 -- "$RIVERSCOPE_HOME/certs/$certificate"
-done
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 1 \
+    -subj '/CN=localhost' \
+    -keyout "$RIVERSCOPE_HOME/certs/server.key" \
+    -out "$RIVERSCOPE_HOME/certs/server.crt" >/dev/null 2>&1
+cp -- "$RIVERSCOPE_HOME/certs/server.crt" \
+    "$RIVERSCOPE_HOME/certs/community-ca.crt"
+chmod 600 -- "$RIVERSCOPE_HOME/certs/"*.crt "$RIVERSCOPE_HOME/certs/"*.key
 
 cat > "$RIVERSCOPE_HOME/secrets/hub.env" <<'ENV'
 WXA_COMMUNITY_APPROVAL_ACK=YES
