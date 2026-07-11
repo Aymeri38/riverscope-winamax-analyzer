@@ -11,6 +11,7 @@ from watchdog.observers import Observer
 from app.core.process_guard import AnalysisForbiddenError, analysis_interlock
 from app.database import SessionLocal
 from app.services.importer import rescan_all
+from app.services.community_client import CommunityClient, sync_community_after_rescan
 from app.services.settings import load_settings
 
 
@@ -43,7 +44,7 @@ class _HistoryEventHandler(FileSystemEventHandler):
 class HistoryWatcher:
     """watchdog-backed rescanner; it only observes configured history directories."""
 
-    def __init__(self) -> None:
+    def __init__(self, community_client: CommunityClient | None = None) -> None:
         self._observer = Observer()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -53,6 +54,8 @@ class HistoryWatcher:
         self._stop_lock = threading.Lock()
         self._observer_started = False
         self._observer_stop_requested = False
+        self._community_client = community_client
+        self._last_community_sync = 0.0
 
     def start(self) -> None:
         with self._start_lock:
@@ -114,6 +117,14 @@ class HistoryWatcher:
                     settings = load_settings(db)
                     analysis_interlock.ensure_allowed()
                     outcome = rescan_all(db, settings)
+                    now_monotonic = time.monotonic()
+                    if (
+                        self._community_client is not None
+                        and now_monotonic - self._last_community_sync
+                        >= settings.community_sync_interval_seconds
+                    ):
+                        sync_community_after_rescan(db, self._community_client)
+                        self._last_community_sync = now_monotonic
                     if outcome.imported or outcome.failed:
                         logger.info(
                             "Import post-session: %d importé(s), %d en attente, %d échec(s)",

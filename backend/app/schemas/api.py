@@ -39,6 +39,7 @@ class AnalyzerSettings(BaseModel):
     ai_enabled: bool = False
     ai_provider: str | None = None
     anonymize_exports: bool = True
+    community_sync_interval_seconds: int = Field(default=60, ge=30, le=3600)
 
     @field_validator("history_paths")
     @classmethod
@@ -68,6 +69,7 @@ class SettingsPatch(BaseModel):
     ai_enabled: bool | None = None
     ai_provider: str | None = None
     anonymize_exports: bool | None = None
+    community_sync_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
 
 
 class RestoreRequest(BaseModel):

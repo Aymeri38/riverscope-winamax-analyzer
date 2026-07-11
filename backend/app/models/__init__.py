@@ -2,6 +2,7 @@ from app.models.entities import (
     Action,
     AnalysisResult,
     BoardCard,
+    CommunitySyncRecord,
     Hand,
     HandPlayer,
     HeroHoleCard,
@@ -18,6 +19,7 @@ __all__ = [
     "Action",
     "AnalysisResult",
     "BoardCard",
+    "CommunitySyncRecord",
     "Hand",
     "HandPlayer",
     "HeroHoleCard",
@@ -29,4 +31,3 @@ __all__ = [
     "Tournament",
     "TournamentPlayer",
 ]
-

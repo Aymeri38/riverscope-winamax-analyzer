@@ -102,6 +102,9 @@ class Tournament(Base):
     hands: Mapped[list[Hand]] = relationship(back_populates="tournament", cascade="all, delete-orphan")
     players: Mapped[list[TournamentPlayer]] = relationship(back_populates="tournament", cascade="all, delete-orphan")
     leak_flags: Mapped[list[LeakFlag]] = relationship(back_populates="tournament")
+    community_sync: Mapped[CommunitySyncRecord | None] = relationship(
+        back_populates="tournament", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class Player(Base):
@@ -297,3 +300,36 @@ class ImportError(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     import_file: Mapped[ImportFile] = relationship(back_populates="errors")
+
+
+class CommunitySyncRecord(Base):
+    """Local delivery queue. It never stores a community bearer token or payload."""
+
+    __tablename__ = "community_sync_records"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending','synced')",
+            name="ck_community_sync_state",
+        ),
+        Index("ix_community_sync_state", "state"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    client_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(20), default="1", nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    remote_public_id: Mapped[str | None] = mapped_column(String(100))
+    last_error_code: Mapped[str | None] = mapped_column(String(80))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow, nullable=False
+    )
+
+    tournament: Mapped[Tournament] = relationship(back_populates="community_sync")

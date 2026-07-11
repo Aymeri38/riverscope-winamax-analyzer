@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import os
+import sys
 import threading
 from collections.abc import Callable, Iterable
 from ctypes import wintypes
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
 
@@ -142,10 +144,71 @@ def _windows_process_names() -> tuple[str, ...]:
     return tuple(names)
 
 
+def _linux_process_names(proc_root: Path = Path("/proc")) -> tuple[str, ...]:
+    """Return Linux process names by reading only ``/proc/<pid>/comm``.
+
+    ``comm`` exposes the kernel task name and is sufficient for an exact
+    ``Winamax.exe`` comparison (including a Wine-hosted executable).  This
+    deliberately avoids process memory, command lines, environment variables,
+    open files and network state.  The probe fails closed when procfs itself
+    cannot be trusted; processes which disappear during enumeration are simply
+    skipped.
+    """
+    if not sys.platform.startswith("linux"):
+        raise ProcessInspectionError("La verification /proc exige Linux.")
+
+    root = proc_root.expanduser()
+    try:
+        if not root.is_dir():
+            raise ProcessInspectionError("Le systeme /proc est indisponible.")
+        # Our own entry proves procfs is mounted. PID 1 proves that process
+        # names outside the current user are visible; hidepid/ProtectProc
+        # configurations would otherwise create a dangerous false negative.
+        for required_pid in (os.getpid(), 1):
+            (root / str(required_pid) / "comm").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        entries = tuple(root.iterdir())
+    except ProcessInspectionError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise ProcessInspectionError(
+            "Impossible de verifier les noms de processus via /proc."
+        ) from exc
+
+    names: list[str] = []
+    for entry in entries:
+        if not entry.name.isdecimal():
+            continue
+        try:
+            name = (entry / "comm").read_text(
+                encoding="utf-8", errors="replace"
+            ).rstrip("\r\n")
+        except FileNotFoundError:
+            # A process can exit between listing /proc and reading its name.
+            continue
+        except OSError as exc:
+            raise ProcessInspectionError(
+                "Enumeration des processus Linux interrompue."
+            ) from exc
+        names.append(name)
+    return tuple(names)
+
+
+def _platform_process_names() -> tuple[str, ...]:
+    if os.name == "nt":
+        return _windows_process_names()
+    if sys.platform.startswith("linux"):
+        return _linux_process_names()
+    raise ProcessInspectionError(
+        "La verification de Winamax.exe n'est pas disponible sur cette plateforme."
+    )
+
+
 def is_winamax_running(
     process_names_provider: Callable[[], Iterable[str]] | None = None,
 ) -> bool:
-    provider = process_names_provider or _windows_process_names
+    provider = process_names_provider or _platform_process_names
     try:
         names = provider()
         return any(str(name).casefold() == WINAMAX_EXECUTABLE.casefold() for name in names)

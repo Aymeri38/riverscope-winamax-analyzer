@@ -270,3 +270,75 @@ export interface ContributionPreview {
   exclusions: string[];
   warnings: string[];
 }
+
+export type CommunitySyncState = "idle" | "pending" | "syncing" | "synced" | "failed" | "blocked" | string;
+
+export interface CommunityMember {
+  contributor_id: string;
+  display_name: string;
+  joined_at?: string | null;
+}
+
+export interface CommunitySyncStatus {
+  state: CommunitySyncState;
+  mandatory: boolean;
+  pending_tournaments: number;
+  last_success_at?: string | null;
+  last_error?: string | null;
+}
+
+export interface CommunityStatus {
+  configured: boolean;
+  available: boolean;
+  online: boolean | null;
+  member: CommunityMember | null;
+  sync: CommunitySyncStatus;
+  synced_tournaments: number;
+  blocked_reason?: string | null;
+}
+
+export interface CommunityJoinInput {
+  hub_url: string;
+  invite: string;
+  display_name: string;
+  consent: true;
+  consent_version: string;
+}
+
+export interface CommunityLeaveResult {
+  configured: false;
+  remote_revoked: boolean;
+  message: string;
+}
+
+export interface CommunityContributor {
+  id: string;
+  display_name: string;
+  tournaments_count: number;
+  hands_count: number;
+  last_sync_at?: string | null;
+  is_self?: boolean;
+}
+
+export interface CommunityDashboard {
+  tournaments_count: number;
+  hands_count: number;
+  contributors_count: number;
+  total_buy_ins: number;
+  total_winnings: number;
+  net_result: number;
+  roi: number;
+  itm: number;
+  win_rate: number;
+}
+
+export interface CommunityTournament extends Tournament {
+  contributor_id: string;
+  contributor_display_name: string;
+}
+
+export interface CommunityHand extends HandSummary {
+  contributor_id: string;
+  contributor_display_name: string;
+  replay_key?: string;
+}

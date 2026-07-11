@@ -12,6 +12,7 @@ import {
   Settings,
   ShieldCheck,
   SlidersHorizontal,
+  Users,
   X
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -26,6 +27,7 @@ const navigation = [
   { to: "/mains", label: "Mains", icon: Hand },
   { to: "/sessions", label: "Sessions", icon: Activity },
   { to: "/leaks", label: "Leaks", icon: BrainCircuit },
+  { to: "/communaute", label: "Communauté", icon: Users },
   { to: "/parametres", label: "Paramètres", icon: Settings }
 ];
 
@@ -35,6 +37,7 @@ const routeTitles: Record<string, string> = {
   "/mains": "Explorateur de mains",
   "/sessions": "Sessions",
   "/leaks": "Analyse des leaks",
+  "/communaute": "Données communautaires",
   "/parametres": "Paramètres"
 };
 
@@ -177,7 +180,7 @@ export function AppLayout() {
             <Outlet />
           </main>
           <footer className="app-footer">
-            <span>Données stockées localement · aucune télémétrie</span>
+            <span>Analyse locale · partage uniquement avec un hub configuré</span>
             <span>Analyse post-session responsable</span>
           </footer>
         </div>

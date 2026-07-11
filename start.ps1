@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 8000
@@ -21,21 +21,26 @@ catch {
 }
 
 if ($WinamaxProcesses.Count -gt 0) {
-    Write-Host 'Démarrage refusé : Winamax.exe est en cours d’exécution.' -ForegroundColor Red
+    Write-Host "Démarrage refusé : Winamax.exe est en cours d’exécution." -ForegroundColor Red
     Write-Host 'Fermez Winamax, puis relancez manuellement start.ps1. Aucun redémarrage automatique ne sera tenté.' -ForegroundColor Yellow
     exit $SafetyExitCode
 }
 
 if (-not (Test-Path -LiteralPath $PythonExe)) {
-    throw 'Runtime Python local absent. Exécutez d’abord : powershell -ExecutionPolicy Bypass -File .\install.ps1'
+    throw "Runtime Python local absent. Exécutez d’abord : powershell -ExecutionPolicy Bypass -File .\install.ps1"
 }
 if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'frontend\dist\index.html'))) {
-    throw 'Frontend non compilé. Exécutez d’abord .\install.ps1.'
+    throw "Frontend non compilé. Exécutez d’abord .\install.ps1."
 }
 
 $env:PYTHONPATH = (Join-Path $ProjectRoot 'backend')
 $env:WXA_DATA_DIR = (Join-Path $ProjectRoot 'data')
 $env:WXA_PORT = [string]$Port
+$CommunityCa = Join-Path $ProjectRoot 'data\community-ca.crt'
+if ([string]::IsNullOrWhiteSpace($env:WXA_COMMUNITY_CA_CERT) -and
+    (Test-Path -LiteralPath $CommunityCa -PathType Leaf)) {
+    $env:WXA_COMMUNITY_CA_CERT = $CommunityCa
+}
 
 Write-Host 'Winamax Analyzer — analyse post-session uniquement' -ForegroundColor Cyan
 Write-Host "URL : http://127.0.0.1:$Port"

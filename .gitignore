@@ -1,6 +1,7 @@
 # Runtime local et données privées
 .runtime/
 data/
+hub-data/
 backend/data/
 backend/.test-data/
 *.db

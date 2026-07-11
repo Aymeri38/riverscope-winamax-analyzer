@@ -4,13 +4,13 @@ Projet indépendant, non affilié à Winamax.
 
 ## Résultat
 
-L’application locale **RiverScope / Winamax Expresso Analyzer** fournit une chaîne complète d’analyse post-session : détection prudente des fichiers terminés, import SQLite idempotent, statistiques, détection explicable de tendances, exploration des parties et replayer manuel.
+L’application **RiverScope / Winamax Expresso Analyzer** fournit une chaîne complète d’analyse post-session : détection prudente des fichiers terminés, import SQLite idempotent, statistiques, détection explicable de tendances, exploration des parties et replayer manuel. Un hub séparé permet en option de synchroniser les parties terminées d’un groupe autorisé sur un serveur contrôlé par l’hôte, PC ou VPS.
 
 La validation publique repose sur des fixtures synthétiques et ne contient aucun volume, résultat, pseudo, chemin, identifiant ou horodatage provenant d’un compte réel.
 
-- **50 tests réussis** ;
+- **115 tests réussis sous Windows, 3 tests Linux ignorés localement et rejoués par la CI Ubuntu** ;
 - build React, TypeScript et Vite réussi ;
-- backend et frontend liés exclusivement à `127.0.0.1` ;
+- backend et frontend d’analyse liés exclusivement à `127.0.0.1` ; hub lié à loopback par défaut et TLS obligatoire hors loopback ;
 - refus du démarrage et arrêt coordonné validés lorsque `Winamax.exe` est détecté ;
 - import, réimport idempotent, API et base vide couverts ;
 - contribution volontaire validée sans télémétrie ni réseau.
@@ -32,9 +32,11 @@ Les fixtures publiables sont entièrement synthétiques. Aucun original Winamax 
 - Backend Python 3.12, FastAPI, SQLAlchemy 2, SQLite, Pydantic et watchdog.
 - Frontend React, TypeScript strict, Vite, Recharts et interface responsive.
 - Base locale `data\winamax_analyzer.db`, initialisée par le mécanisme SQLAlchemy du projet avec contraintes et index SQLite.
-- Tables : `settings`, `import_files`, `tournaments`, `players`, `tournament_players`, `hands`, `hand_players`, `actions`, `board_cards`, `hero_hole_cards`, `analysis_results`, `leak_flags` et `import_errors`.
+- Tables locales : `settings`, `import_files`, `tournaments`, `players`, `tournament_players`, `hands`, `hand_players`, `actions`, `board_cards`, `hero_hole_cards`, `analysis_results`, `leak_flags`, `import_errors` et `community_sync_records`.
+- Base hub séparée avec `members`, `invites`, `devices`, `shared_tournaments`, `shared_hands` et `sync_receipts`.
 - Worker watchdog et rescannage périodique conservateur lorsque le démarrage est autorisé.
-- Scripts Windows : `install.ps1`, `start.ps1`, `scripts\rescan.ps1` et `scripts\run-tests.ps1`.
+- Scripts Windows : `install.ps1`, `start.ps1`, `hub-start.ps1`, `scripts\hub-admin.ps1`, `scripts\community-join.ps1`, `scripts\community-install-ca.ps1`, `scripts\rescan.ps1` et `scripts\run-tests.ps1`.
+- Déploiement VPS utilisateur sans `sudo`, dépendances hub minimales, TLS privé, administration, état, arrêt manuel et sauvegarde SQLite cohérente dans `deploy/vps/`.
 
 ## Import et conformité post-session
 
@@ -66,9 +68,9 @@ Aucune couche ne lit mémoire, trafic, écran, fenêtre, cookie ou compte et auc
 - Paramètres pour les sources, délais, devise, sessions, seuils, thème, export, sauvegarde et option IA.
 - Sauvegarde et restauration SQLite avec contrôle d’intégrité.
 
-## Contribution volontaire à l’amélioration
+## Export agrégé volontaire
 
-La contribution est facultative, ponctuelle et désactivée tant que l’utilisateur ne la déclenche pas depuis la page **Paramètres**. Elle ne collecte pas les historiques et ne transmet rien.
+Cet export, distinct du hub communautaire, est facultatif, ponctuel et désactivé tant que l’utilisateur ne le déclenche pas depuis la page **Paramètres**. Il ne collecte pas les historiques et ne transmet rien.
 
 Flux validé :
 
@@ -90,13 +92,34 @@ Il exclut :
 - notes, tags, tickets, lignes de diagnostic brutes et texte libre ;
 - paramètres, bases, sauvegardes, logs, variables d’environnement et secrets.
 
-Il n’existe aucun endpoint d’upload, appel vers un service externe, retry, envoi différé, télémétrie ou collecte en arrière-plan. L’aperçu et le consentement ne promettent toutefois pas un anonymat absolu : le fichier doit être relu avant tout partage, en particulier avant une publication GitHub susceptible d’être durable.
+Il n’existe pour cet export agrégé aucun endpoint d’upload, appel vers un service externe, retry ou envoi différé. L’aperçu et le consentement ne promettent toutefois pas un anonymat absolu : le fichier doit être relu avant tout partage, en particulier avant une publication GitHub susceptible d’être durable.
 
 La version 1 n’inclut aucune ligne brute. Elle permet de mesurer les formats présents, les catégories d’erreurs et la couverture analytique, mais ne suffit pas à elle seule à reproduire ou corriger une nouvelle formulation textuelle du parser.
 
-## Limite de conformité du partage communautaire
+## Hub communautaire auto-hébergé
 
-Le hub de mains partagées n’est pas implémenté. Le règlement Winamax limite le profiling aux données recueillies par le joueur lui-même et interdit le regroupement de mains jouées par d’autres comptes, le *data mining* et le *data sharing*. Une telle évolution restera bloquée sans accord écrit préalable du service Intégrité Winamax. Chaque installation publique traite donc uniquement les historiques locaux de son utilisateur.
+Le hub de mains partagées est un processus FastAPI et une base SQLite séparés du backend d’analyse. Son exécution et son administration exigent `WXA_COMMUNITY_APPROVAL_ACK=YES` et une référence locale non vide vers l’accord écrit déclaré par l’hôte. Le dépôt ne contient pas cette référence.
+
+Capacités livrées :
+
+- invitations aléatoires à usage unique et expirables ;
+- jetons d’appareil aléatoires dont seul le SHA-256 est persisté sur le hub ;
+- jeton client protégé par Windows DPAPI et inaccessible à React ;
+- synchronisation idempotente par clé HMAC, complétée par un digest de contenu indépendant de l’appareil pour éviter les doublons lors d’un ré-enrôlement, sans identifiant Winamax brut ;
+- liste blanche stricte et rejet des champs supplémentaires ;
+- pseudonyme de contributeur choisi à l’inscription, héros `HERO` et adversaires `OPPONENT_n` réinitialisés par tournoi ;
+- tableau de bord, contributeurs, tournois, mains et replayer partagé filtrables ;
+- consultation refusée avant une première contribution et tant que le client officiel possède une file locale en attente ;
+- `Cache-Control: no-store`, absence de CORS, `TrustedHost`, taille de corps limitée et pagination ;
+- quotas persistants par membre et limites de débit en mémoire pour enrôlement, synchronisation et autres routes ;
+- écoute loopback par défaut et certificat/clé TLS obligatoires hors loopback ;
+- arrêt sans relance si `Winamax.exe` apparaît sur l’hôte ; sous Linux, le garde lit uniquement `/proc/<pid>/comm` et échoue fermé si les processus d’autres utilisateurs sont masqués.
+
+Les données persistantes communes résident uniquement dans le répertoire configuré du serveur hôte. Les historiques sources et la file technique restent nécessairement sur les PC contributeurs ; les réponses consultées ne sont pas importées dans leur SQLite. Le hub n’envoie aucune donnée à un second service applicatif. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots relèvent cependant de l’hébergeur et doivent être inclus dans le consentement du groupe.
+
+Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle ne crée aucun profil adverse global persistant et reste entièrement post-session.
+
+La pseudonymisation ne promet pas l’anonymat : chronologie exacte, cartes, actions, montants et résultats restent corrélables. Le modèle de menace fait confiance au compte système du serveur hôte et à ses processus. Enfin, un serveur ne peut pas attester qu’un fork open source n’a pas retiré ses propres gardes ou falsifié les dates envoyées. L’hôte doit donc protéger la base hors synchronisation ou partage réseau, inviter uniquement des membres de confiance et administrer révocations, quotas et sauvegardes.
 
 ## Tests
 
@@ -109,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 Résultat validé :
 
 ```text
-50 passed in 5.52s
+115 passed, 3 skipped in 12.29s  # Windows local
 ```
 
 Couverture fonctionnelle :
@@ -123,6 +146,11 @@ Couverture fonctionnelle :
 - équité exacte ou simulée et refus des cartes inconnues ;
 - API tableau de bord, santé, parties, mains, sessions, replayer, leaks et base vide ;
 - contribution canonique, tranches de confidentialité, digest, base vide, exclusion de canaris privés et garde fichiers active ;
+- sérialisation communautaire sans identifiants bruts, DPAPI injecté en test, file hors ligne, blocage des vues tant qu’un envoi attend et contrat client vers hub réel ;
+- enrôlement, invitation à usage unique, token hashé, auth Bearer, contribution préalable, idempotence, filtres, replayer, rejet des champs sensibles et des données de moins de 60 secondes ;
+- roundtrip DPAPI Windows réel, révocation distante, rotation de secret/ré-enrôlement sur nouvelle base locale et déduplication de contenu inter-appareils ;
+- quotas, réponse distante plafonnée, deadline totale, TrustedHost, corps 413, en-têtes anti-framing/nosniff et rejet des mutations navigateur cross-site ;
+- refus du hub hors loopback sans TLS, attestation d’accord requise et scripts hub refusés avec le code `23` lorsque Winamax est actif ;
 - interverrouillage `Winamax.exe`, arrêt idempotent du watcher et rollback avant commit.
 
 ## Validation de l’interverrouillage
@@ -142,16 +170,18 @@ L’interface desktop et mobile est vérifiée avec des données synthétiques. 
 
 ## Sécurité et confidentialité
 
-- données, exports et sauvegardes conservés dans le projet local ;
-- aucune télémétrie, publicité ou collecte automatique ;
-- API et frontend liés uniquement à la boucle locale ;
+- données d’analyse, exports et sauvegardes conservés sur chaque PC ; données communautaires persistantes conservées uniquement sur le serveur choisi par l’hôte ;
+- aucune télémétrie ni publicité ; synchronisation réseau uniquement après appairage explicite au hub ;
+- API d’analyse et frontend liés uniquement à la boucle locale ; hub sur loopback par défaut et TLS obligatoire pour une écoute distante ;
+- mutations navigateur limitées aux origines loopback autorisées, interface non intégrable en iframe et en-têtes CSP/nosniff/referrer appliqués ;
 - détection limitée au nom exact `Winamax.exe`, sans lecture de mémoire, avec arrêt total et aucune relance automatique ;
 - exports pseudonymisés par défaut, sans garantie d’anonymat et à inspecter avant partage ;
 - logs limités aux comptes et états techniques, sans cartes ni pseudos adverses par défaut ;
 - diagnostics de lignes pseudonymisés et cartes masquées ;
 - fixtures publiques entièrement synthétiques ;
 - option IA désactivée, aperçu pseudonymisé, confirmation obligatoire et aucun fournisseur câblé ;
-- paquet de contribution agrégé, aperçu intégral, consentement ponctuel, enregistrement local et transmission exclusivement manuelle.
+- export agrégé avec aperçu intégral, consentement ponctuel, enregistrement local et transmission exclusivement manuelle ;
+- hub avec consentement initial, contribution obligatoire, jeton DPAPI côté client, jetons hashés côté serveur, liste blanche et réponses non mises en cache.
 
 ## Limites restantes
 
@@ -164,6 +194,12 @@ L’interface desktop et mobile est vérifiée avec des données synthétiques. 
 7. Le worker fonctionne seulement tant que `start.ps1` et le backend sont autorisés; `Winamax.exe` provoque leur arrêt sans relance.
 8. Le connecteur IA est volontairement non implémenté; le cœur local n’en dépend pas.
 9. Le paquet de contribution v1 ne contient pas de lignes brutes et ne peut donc pas reproduire seul un nouveau libellé non reconnu.
+10. Le hub est mono-instance SQLite et vise un groupe privé de taille modérée; ce n’est pas une plateforme Internet multi-région.
+11. L’hôte doit administrer certificat, DNS éventuel, pare-feu, sauvegardes et disponibilité du serveur. Le déploiement sans privilèges expose directement un port TLS non privilégié ; une terminaison TLS publique sur 443 et un service système durci nécessitent une intervention `sudo` distincte.
+12. Le hub est volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent alors leur file locale jusqu’à un redémarrage manuel autorisé.
+13. Les alias adverses sont propres à chaque tournoi : les données permettent le suivi global des contributeurs consentants, pas le profilage persistant des adversaires.
+14. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit tableaux filtrés et replayer en lecture seule. Les classifications/profondeurs analytiques restent locales, les stacks du replayer partagé sont statiques et les cartes adverses révélées ne sont pas encore rendues autour de la table.
+15. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.
 
 ## Démarrage
 

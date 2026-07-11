@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Python = Join-Path $ProjectRoot '.runtime\python\python.exe'
 if (-not (Test-Path -LiteralPath $Python)) { throw 'Exécutez install.ps1 avant ce script.' }

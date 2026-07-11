@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -41,12 +41,12 @@ if (-not (Test-Path -LiteralPath $PipPackage)) {
         Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile $GetPip -UseBasicParsing
     }
     & $PythonExe $GetPip --no-warn-script-location
-    if ($LASTEXITCODE -ne 0) { throw 'Échec de l’installation locale de pip.' }
+    if ($LASTEXITCODE -ne 0) { throw "Échec de l’installation locale de pip." }
 }
 
 Write-Host 'Installation des dépendances Python dans le runtime du projet...'
 & $PythonExe -m pip install --disable-pip-version-check --no-warn-script-location -r (Join-Path $ProjectRoot 'backend\requirements.txt')
-if ($LASTEXITCODE -ne 0) { throw 'Échec de l’installation des dépendances Python.' }
+if ($LASTEXITCODE -ne 0) { throw "Échec de l’installation des dépendances Python." }
 
 $Npm = (Get-Command npm.cmd -ErrorAction SilentlyContinue).Source
 if (-not $Npm) { throw 'Node.js/npm est requis mais npm.cmd est introuvable.' }
@@ -62,7 +62,7 @@ try {
     $env:PYTHONPATH = (Join-Path $ProjectRoot 'backend')
     $env:WXA_DATA_DIR = (Join-Path $ProjectRoot 'data')
     & $PythonExe -m app.cli init
-    if ($LASTEXITCODE -ne 0) { throw 'Échec de l’initialisation de la base.' }
+    if ($LASTEXITCODE -ne 0) { throw "Échec de l’initialisation de la base." }
 }
 finally {
     Pop-Location
