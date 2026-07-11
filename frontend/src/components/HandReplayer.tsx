@@ -87,19 +87,40 @@ export function HandReplayer({
   function jumpStreet(direction: 1 | -1) {
     if (!data) return;
     const streets = ["preflop", "flop", "turn", "river", "showdown"];
-    const currentStreetIndex = Math.max(0, streets.indexOf(currentAction?.street ?? "preflop"));
-    const targetStreet = streets[Math.min(streets.length - 1, Math.max(0, currentStreetIndex + direction))];
-    let targetIndex = data.actions.findIndex((action) => action.street === targetStreet);
-    if (direction < 0) {
-      targetIndex = -1;
-      for (let index = data.actions.length - 1; index >= 0; index -= 1) {
-        if (data.actions[index].street === targetStreet) {
-          targetIndex = index;
-          break;
-        }
+    const availableStreets = streets.filter((candidate) =>
+      data.actions.some((action) => action.street === candidate)
+    );
+    if (!availableStreets.length) return;
+
+    if (!currentAction) {
+      if (direction > 0) {
+        setStep(data.actions.findIndex((action) => action.street === availableStreets[0]));
+      }
+      return;
+    }
+
+    const currentStreetIndex = availableStreets.indexOf(currentAction.street);
+    if (direction > 0) {
+      if (currentStreetIndex >= availableStreets.length - 1) {
+        setStep(data.actions.length - 1);
+        return;
+      }
+      const targetStreet = availableStreets[currentStreetIndex + 1];
+      setStep(data.actions.findIndex((action) => action.street === targetStreet));
+      return;
+    }
+
+    if (currentStreetIndex <= 0) {
+      setStep(-1);
+      return;
+    }
+    const targetStreet = availableStreets[currentStreetIndex - 1];
+    for (let index = data.actions.length - 1; index >= 0; index -= 1) {
+      if (data.actions[index].street === targetStreet) {
+        setStep(index);
+        return;
       }
     }
-    if (targetIndex >= 0) setStep(targetIndex);
   }
 
   async function saveAnnotations() {
