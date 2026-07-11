@@ -25,7 +25,19 @@ function boardAtAction(board: string[], action?: ReplayAction): string[] {
   return board.slice(0, 5);
 }
 
-export function HandReplayer({ handId, open, onClose }: { handId: number | string | null; open: boolean; onClose: () => void }) {
+export function HandReplayer({
+  handId,
+  open,
+  onClose,
+  loadReplay,
+  readOnly = false
+}: {
+  handId: number | string | null;
+  open: boolean;
+  onClose: () => void;
+  loadReplay?: (id: number | string) => Promise<ReplayData>;
+  readOnly?: boolean;
+}) {
   const { safeToAnalyze } = useSafety();
   const [data, setData] = useState<ReplayData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -34,6 +46,7 @@ export function HandReplayer({ handId, open, onClose }: { handId: number | strin
   const [notes, setNotes] = useState("");
   const [tags, setTags] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const replayLoader = loadReplay ?? api.replay;
 
   useEffect(() => {
     if (!open || handId === null || !safeToAnalyze) return;
@@ -41,8 +54,7 @@ export function HandReplayer({ handId, open, onClose }: { handId: number | strin
     setLoading(true);
     setError(null);
     setStep(-1);
-    api
-      .replay(handId)
+    replayLoader(handId)
       .then((replay) => {
         if (!active) return;
         setData(replay);
@@ -54,7 +66,7 @@ export function HandReplayer({ handId, open, onClose }: { handId: number | strin
     return () => {
       active = false;
     };
-  }, [handId, open, safeToAnalyze]);
+  }, [handId, open, replayLoader, safeToAnalyze]);
 
   useEffect(() => {
     if (!open) return;
@@ -114,7 +126,7 @@ export function HandReplayer({ handId, open, onClose }: { handId: number | strin
       <section className="replayer-modal" role="dialog" aria-modal="true" aria-labelledby="replayer-title">
         <header className="modal-header">
           <div>
-            <p className="eyebrow">Lecture manuelle · main terminée</p>
+            <p className="eyebrow">{readOnly ? "Lecture partagée · main terminée" : "Lecture manuelle · main terminée"}</p>
             <h2 id="replayer-title">Replayer {data?.hand.hand_id ? `#${data.hand.hand_id}` : "de la main"}</h2>
           </div>
           <button className="icon-button" onClick={onClose} aria-label="Fermer le replayer" type="button">
@@ -230,22 +242,29 @@ export function HandReplayer({ handId, open, onClose }: { handId: number | strin
                   </button>
                 ))}
               </div>
-              <div className="annotation-form">
-                <h3>Notes personnelles</h3>
-                <label>
-                  Notes
-                  <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={4} placeholder="Votre lecture de la main…" />
-                </label>
-                <label>
-                  Tags <small>(séparés par des virgules)</small>
-                  <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="à revoir, HU, river" />
-                </label>
-                <button className="button secondary" onClick={saveAnnotations} disabled={saveState === "saving"} type="button">
-                  <Save size={16} /> {saveState === "saving" ? "Enregistrement…" : "Enregistrer"}
-                </button>
-                {saveState === "saved" && <small className="success-text">Annotations enregistrées.</small>}
-                {saveState === "error" && <small className="error-text">Enregistrement impossible.</small>}
-              </div>
+              {readOnly ? (
+                <div className="annotation-form community-readonly-note">
+                  <h3>Lecture seule</h3>
+                  <p>Les annotations privées du contributeur ne sont ni chargées ni modifiables.</p>
+                </div>
+              ) : (
+                <div className="annotation-form">
+                  <h3>Notes personnelles</h3>
+                  <label>
+                    Notes
+                    <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={4} placeholder="Votre lecture de la main…" />
+                  </label>
+                  <label>
+                    Tags <small>(séparés par des virgules)</small>
+                    <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="à revoir, HU, river" />
+                  </label>
+                  <button className="button secondary" onClick={saveAnnotations} disabled={saveState === "saving"} type="button">
+                    <Save size={16} /> {saveState === "saving" ? "Enregistrement…" : "Enregistrer"}
+                  </button>
+                  {saveState === "saved" && <small className="success-text">Annotations enregistrées.</small>}
+                  {saveState === "error" && <small className="error-text">Enregistrement impossible.</small>}
+                </div>
+              )}
             </aside>
           </div>
         ) : null}

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from app import __version__
 from app.analytics import UNKNOWN_OPPONENT_MESSAGE, calculate_equity
 from app.core.process_guard import AnalysisForbiddenError, analysis_interlock
+from app.core.community_secret import CommunitySecretError
 from app.database import get_db
 from app.models import Hand, HandPlayer, ImportFile, Tournament, TournamentPlayer
 from app.schemas.api import (
@@ -24,6 +25,14 @@ from app.schemas.api import (
     SettingsPatch,
 )
 from app.schemas.contribution import ContributionPreviewResponse
+from app.schemas.community import (
+    COMMUNITY_CONSENT_VERSION,
+    CommunityJoinRequest,
+    CommunityJoinResponse,
+    CommunityLeaveResponse,
+    CommunityStatusResponse,
+    CommunitySyncResponse,
+)
 from app.services.activity_guard import detect_active_tournaments
 from app.services.data_management import (
     create_backup,
@@ -33,6 +42,19 @@ from app.services.data_management import (
     restore_backup,
 )
 from app.services.contribution import build_contribution_preview
+from app.services.community_client import (
+    CommunityActivityError,
+    CommunityClient,
+    CommunityAlreadyConfiguredError,
+    CommunityContributionRequiredError,
+    CommunityError,
+    CommunityNotConfiguredError,
+    CommunityOfflineError,
+    CommunityPendingError,
+    CommunityRemoteError,
+    ensure_community_post_session,
+    sync_community_after_rescan,
+)
 from app.services.importer import rescan_all
 from app.services.leak_engine import detect_leaks
 from app.services.poker_stats import calculate_hero_stats
@@ -532,11 +554,15 @@ def import_status(request: Request, db: Session = Depends(get_db)) -> dict[str, 
 
 
 @router.post("/import/rescan")
-def rescan(db: Session = Depends(get_db)) -> dict[str, Any]:
+def rescan(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         analysis_interlock.ensure_allowed()
         settings = load_settings(db)
-        return rescan_all(db, settings).to_dict()
+        outcome = rescan_all(db, settings)
+        community_client = getattr(request.app.state, "community_client", None)
+        if isinstance(community_client, CommunityClient):
+            sync_community_after_rescan(db, community_client)
+        return outcome.to_dict()
     except AnalysisForbiddenError as exc:
         db.rollback()
         raise HTTPException(
@@ -575,6 +601,224 @@ def delete_data(request: DeleteRequest, db: Session = Depends(get_db)) -> dict[s
         raise HTTPException(status_code=400, detail="Saisir SUPPRIMER pour confirmer")
     delete_analyzed_data(db)
     return {"message": "Données d’analyse supprimées; paramètres conservés."}
+
+
+def _community_client(request: Request) -> CommunityClient:
+    client = getattr(request.app.state, "community_client", None)
+    if not isinstance(client, CommunityClient):
+        raise HTTPException(status_code=503, detail="Client communautaire indisponible")
+    return client
+
+
+def _community_guard(db: Session) -> None:
+    try:
+        ensure_community_post_session(db)
+    except CommunityActivityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_423_LOCKED,
+            detail="Mode communautaire bloqué pendant une activité potentielle.",
+        ) from exc
+    except AnalysisForbiddenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mode communautaire interdit par le verrou Winamax.exe.",
+        ) from exc
+
+
+def _raise_community_http(exc: Exception) -> None:
+    if isinstance(exc, CommunityAlreadyConfiguredError):
+        code = status.HTTP_409_CONFLICT
+        detail = "Cette installation est déjà associée; quittez d'abord le hub actuel."
+    elif isinstance(exc, CommunityNotConfiguredError):
+        code = status.HTTP_409_CONFLICT
+        detail = "Le mode communautaire n'est pas configuré."
+    elif isinstance(exc, CommunityPendingError):
+        code = status.HTTP_409_CONFLICT
+        detail = "Les données locales en attente doivent être synchronisées avant consultation."
+    elif isinstance(exc, CommunityContributionRequiredError):
+        code = status.HTTP_409_CONFLICT
+        detail = "Synchronisez au moins un tournoi terminé avant consultation."
+    elif isinstance(exc, CommunityActivityError):
+        code = status.HTTP_423_LOCKED
+        detail = "Mode communautaire bloqué pendant une activité potentielle."
+    elif isinstance(exc, CommunityOfflineError):
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+        detail = "Hub communautaire hors ligne; les données restent en attente locale."
+    elif isinstance(exc, CommunityRemoteError):
+        code = status.HTTP_502_BAD_GATEWAY
+        detail = "Le hub communautaire a refusé ou mal formé sa réponse."
+    elif isinstance(exc, (CommunitySecretError, OSError)):
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+        detail = "Les identifiants communautaires locaux sont indisponibles."
+    else:
+        code = status.HTTP_503_SERVICE_UNAVAILABLE
+        detail = "Mode communautaire indisponible."
+    raise HTTPException(status_code=code, detail=detail) from exc
+
+
+@router.get("/community/status", response_model=CommunityStatusResponse)
+def community_status(request: Request, db: Session = Depends(get_db)) -> CommunityStatusResponse:
+    _community_guard(db)
+    try:
+        result = _community_client(request).status(db)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return result
+
+
+@router.post("/community/join", response_model=CommunityJoinResponse)
+def community_join(
+    payload: CommunityJoinRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> CommunityJoinResponse:
+    _community_guard(db)
+    try:
+        result = _community_client(request).join(db, payload)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return CommunityJoinResponse(
+        configured=True,
+        available=bool(result["available"]),
+        pending=int(result["pending"]),
+        synced=int(result["synced"]),
+        consent_version=COMMUNITY_CONSENT_VERSION,
+    )
+
+
+@router.delete("/community/leave", response_model=CommunityLeaveResponse)
+def community_leave(request: Request, db: Session = Depends(get_db)) -> CommunityLeaveResponse:
+    _community_guard(db)
+    try:
+        remote_revoked = _community_client(request).leave(db)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return CommunityLeaveResponse(
+        configured=False,
+        remote_revoked=remote_revoked,
+        message=(
+            "Appareil révoqué du hub et identifiants locaux supprimés."
+            if remote_revoked
+            else "Identifiants locaux supprimés; révocation distante à vérifier auprès de l'hôte."
+        ),
+    )
+
+
+@router.post("/community/sync", response_model=CommunitySyncResponse)
+def community_sync(request: Request, db: Session = Depends(get_db)) -> CommunitySyncResponse:
+    _community_guard(db)
+    try:
+        result = _community_client(request).sync(db)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return result
+
+
+def _community_proxy(
+    request: Request,
+    db: Session,
+    path: str,
+    params: dict[str, str | int | None] | None = None,
+) -> Any:
+    _community_guard(db)
+    try:
+        result = _community_client(request).proxy_get(db, path, params=params)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return result
+
+
+def _validated_public_id(value: str) -> str:
+    if not value or len(value) > 100 or any(
+        character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        for character in value
+    ):
+        raise HTTPException(status_code=400, detail="Identifiant public invalide")
+    return value
+
+
+@router.get("/community/contributors")
+def community_contributors(request: Request, db: Session = Depends(get_db)) -> Any:
+    return _community_proxy(request, db, "/v1/contributors")
+
+
+@router.get("/community/dashboard")
+def community_dashboard(
+    request: Request,
+    contributor_id: str | None = None,
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request, db, "/v1/dashboard", {"contributor_id": contributor_id}
+    )
+
+
+@router.get("/community/tournaments")
+def community_tournaments(
+    request: Request,
+    contributor_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        "/v1/tournaments",
+        {"contributor_id": contributor_id, "limit": limit, "offset": offset},
+    )
+
+
+@router.get("/community/tournaments/{public_id}")
+def community_tournament_detail(
+    public_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    _community_guard(db)
+    return _community_proxy(request, db, f"/v1/tournaments/{_validated_public_id(public_id)}")
+
+
+@router.get("/community/hands")
+def community_hands(
+    request: Request,
+    contributor_id: str | None = None,
+    tournament_id: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        "/v1/hands",
+        {
+            "contributor_id": contributor_id,
+            "tournament_id": tournament_id,
+            "limit": limit,
+            "offset": offset,
+        },
+    )
+
+
+@router.get("/community/replay/{public_id}")
+def community_replay(
+    public_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    _community_guard(db)
+    return _community_proxy(request, db, f"/v1/hands/{_validated_public_id(public_id)}/replay")
 
 
 @router.get("/export/tournaments.csv", response_class=PlainTextResponse)

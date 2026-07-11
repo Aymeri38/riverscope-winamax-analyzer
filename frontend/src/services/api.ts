@@ -3,6 +3,13 @@ import type {
   ApiPage,
   AppSettings,
   BreakdownRow,
+  CommunityContributor,
+  CommunityDashboard,
+  CommunityHand,
+  CommunityJoinInput,
+  CommunityLeaveResult,
+  CommunityStatus,
+  CommunityTournament,
   ContributionPreview,
   DashboardData,
   HandSummary,
@@ -371,53 +378,187 @@ function normalizeImportStatus(raw: JsonRecord): ImportStatus {
   };
 }
 
-function normalizeReplay(raw: JsonRecord): ReplayData {
+function normalizeReplay(raw: JsonRecord, anonymizeOpponents = false): ReplayData {
   const players: JsonRecord[] = Array.isArray(raw.players) ? raw.players : [];
   const actions: JsonRecord[] = Array.isArray(raw.actions) ? raw.actions : [];
   const blinds = raw.blinds && typeof raw.blinds === "object" && !Array.isArray(raw.blinds) ? raw.blinds as JsonRecord : {};
   const result = raw.result && typeof raw.result === "object" ? raw.result as JsonRecord : {};
   const heroNet = nullableNumber(result.hero_net ?? raw.hero_net);
+  const playerLabels = new Map<string, string>();
+  let opponentIndex = 0;
+  players.forEach((player) => {
+    const rawName = string(player.name ?? player.alias, "Joueur");
+    const isHero = Boolean(player.is_hero) || rawName.toUpperCase() === "HERO";
+    if (!isHero) opponentIndex += 1;
+    playerLabels.set(rawName, isHero ? "Héros" : `Adversaire ${opponentIndex}`);
+  });
+  const publicPlayerName = (value: unknown, isHero = false) => {
+    const rawName = string(value, "Joueur");
+    if (!anonymizeOpponents) return rawName;
+    if (isHero || rawName.toUpperCase() === "HERO") return "Héros";
+    return playerLabels.get(rawName) ?? "Adversaire";
+  };
+  const redactPlayerNames = (value: unknown) => {
+    let output = string(value);
+    if (!anonymizeOpponents) return output;
+    [...playerLabels.entries()]
+      .sort(([left], [right]) => right.length - left.length)
+      .forEach(([rawName, label]) => {
+        if (rawName) output = output.split(rawName).join(label);
+      });
+    return output;
+  };
   return {
     hand: {
-      id: raw.id ?? raw.hand_id,
-      hand_id: string(raw.hand_id),
+      id: raw.id ?? raw.public_id ?? raw.hand_id ?? raw.hand_number,
+      hand_id: string(raw.hand_id ?? raw.hand_number),
       tournament_id: raw.tournament_id,
       played_at: string(raw.played_at),
-      notes: string(raw.notes) || null,
-      tags: stringList(raw.tags)
+      notes: anonymizeOpponents ? null : string(raw.notes) || null,
+      tags: anonymizeOpponents ? [] : stringList(raw.tags)
     },
     seats: players.map((player, index) => ({
       id: player.seat ?? index,
-      name: string(player.name, `Joueur ${index + 1}`),
+      name: publicPlayerName(player.name ?? player.alias ?? `Joueur ${index + 1}`, Boolean(player.is_hero)),
       position: string(player.position) || undefined,
       starting_stack: number(player.starting_stack ?? player.stack),
-      is_hero: Boolean(player.is_hero)
+      is_hero: Boolean(player.is_hero) || string(player.name ?? player.alias).toUpperCase() === "HERO"
     })),
-    actions: actions.map((action, index): ReplayAction => ({
-      id: action.id ?? action.sequence ?? index,
-      order: number(action.order ?? action.step ?? action.sequence, index + 1),
-      street: string(action.street, "preflop"),
-      player_name: string(action.player_name ?? action.actor, "Joueur"),
-      position: string(action.position) || undefined,
-      action: string(action.action ?? action.type),
-      amount: nullableNumber(action.amount ?? action.to_amount),
-      amount_bb: nullableNumber(action.amount_bb),
-      pot_after: nullableNumber(action.pot_after),
-      stack_after: nullableNumber(action.stack_after),
-      is_hero: string(action.player_name ?? action.actor).toUpperCase() === "HERO"
-    })),
+    actions: actions.map((action, index): ReplayAction => {
+      const actor = action.player_name ?? action.actor ?? action.actor_alias;
+      const isHero = Boolean(action.is_hero) || string(actor).toUpperCase() === "HERO" || playerLabels.get(string(actor)) === "Héros";
+      return {
+        id: action.id ?? action.sequence ?? index,
+        order: number(action.order ?? action.step ?? action.sequence, index + 1),
+        street: string(action.street, "preflop").toLowerCase(),
+        player_name: publicPlayerName(actor, isHero),
+        position: string(action.position) || undefined,
+        action: redactPlayerNames(action.action ?? action.type ?? action.action_type),
+        amount: nullableNumber(action.amount ?? action.to_amount),
+        amount_bb: nullableNumber(action.amount_bb),
+        pot_after: nullableNumber(action.pot_after),
+        stack_after: nullableNumber(action.stack_after),
+        is_hero: isHero
+      };
+    }),
     hero_cards: splitCards(raw.hero_cards),
     board: splitCards(raw.board),
     initial_pot: number(raw.initial_pot),
-    final_pot: number(raw.final_pot ?? raw.pot),
-    small_blind: number(blinds.small ?? (Array.isArray(raw.blinds) ? raw.blinds[0] : 0)),
-    big_blind: number(blinds.big ?? (Array.isArray(raw.blinds) ? raw.blinds[1] : 0)),
-    ante: number(blinds.ante ?? (Array.isArray(raw.blinds) ? raw.blinds[2] : 0)),
-    winner: string(raw.winner) || undefined,
-    result: typeof raw.result === "string" ? raw.result : heroNet === null ? "Résultat non renseigné" : `Résultat du héros : ${heroNet >= 0 ? "+" : ""}${heroNet} jetons`,
+    final_pot: number(raw.final_pot ?? raw.pot ?? raw.total_pot),
+    small_blind: number(blinds.small ?? raw.small_blind ?? (Array.isArray(raw.blinds) ? raw.blinds[0] : 0)),
+    big_blind: number(blinds.big ?? raw.big_blind ?? (Array.isArray(raw.blinds) ? raw.blinds[1] : 0)),
+    ante: number(blinds.ante ?? raw.ante ?? (Array.isArray(raw.blinds) ? raw.blinds[2] : 0)),
+    winner: string(raw.winner) ? publicPlayerName(raw.winner, playerLabels.get(string(raw.winner)) === "Héros") : undefined,
+    result: typeof raw.result === "string" ? redactPlayerNames(raw.result) : heroNet === null ? "Résultat non renseigné" : `Résultat du héros : ${heroNet >= 0 ? "+" : ""}${heroNet} jetons`,
     equity: raw.equity ?? null,
     safe_to_replay: true,
     tournament_finished: true
+  };
+}
+
+function communityPayload(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const record = raw as JsonRecord;
+  return record.data ?? record.payload ?? record.result ?? raw;
+}
+
+function communityRecord(raw: unknown): JsonRecord {
+  const payload = communityPayload(raw);
+  return payload && typeof payload === "object" && !Array.isArray(payload) ? payload as JsonRecord : {};
+}
+
+function communityItems(raw: unknown): JsonRecord[] {
+  const payload = communityPayload(raw);
+  if (Array.isArray(payload)) return payload as JsonRecord[];
+  if (!payload || typeof payload !== "object") return [];
+  const record = payload as JsonRecord;
+  const values = record.items ?? record.contributors ?? record.tournaments ?? record.hands;
+  return Array.isArray(values) ? values as JsonRecord[] : [];
+}
+
+function normalizeCommunityStatus(raw: unknown): CommunityStatus {
+  const payload = communityRecord(raw);
+  const member = payload.member && typeof payload.member === "object" ? payload.member as JsonRecord : null;
+  const sync = payload.sync && typeof payload.sync === "object" ? payload.sync as JsonRecord : {};
+  const available = Boolean(payload.available ?? sync.available ?? payload.configured);
+  const onlineValue = payload.online ?? sync.online;
+  const online = onlineValue === undefined || onlineValue === null ? null : Boolean(onlineValue);
+  const pending = number(sync.pending_tournaments ?? sync.pending ?? payload.pending);
+  const blockedReason = string(payload.blocked_reason ?? sync.blocked_reason ?? sync.last_error) || null;
+  const state = blockedReason || !available
+    ? "blocked"
+    : online === false
+      ? "failed"
+      : pending > 0
+        ? "pending"
+        : "synced";
+  return {
+    configured: Boolean(payload.configured ?? member),
+    available,
+    online,
+    member: member
+      ? {
+          contributor_id: string(member.contributor_id ?? member.id),
+          display_name: string(member.display_name ?? member.name, "Membre"),
+          joined_at: string(member.joined_at) || null
+        }
+      : null,
+    sync: {
+      state: string(sync.state, state),
+      mandatory: sync.mandatory === undefined ? true : Boolean(sync.mandatory),
+      pending_tournaments: pending,
+      last_success_at: string(sync.last_success_at ?? sync.last_sync_at ?? payload.last_sync_at) || null,
+      last_error: string(sync.last_error ?? blockedReason) || null
+    },
+    synced_tournaments: number(payload.synced ?? sync.synced),
+    blocked_reason: blockedReason
+  };
+}
+
+function normalizeCommunityContributor(raw: JsonRecord): CommunityContributor {
+  return {
+    id: string(raw.contributor_id ?? raw.public_id ?? raw.id),
+    display_name: string(raw.display_name ?? raw.name, "Contributeur"),
+    tournaments_count: number(raw.tournaments_count ?? raw.tournament_count ?? raw.tournaments),
+    hands_count: number(raw.hands_count ?? raw.hand_count ?? raw.hands),
+    last_sync_at: string(raw.last_sync_at ?? raw.last_seen_at) || null,
+    is_self: Boolean(raw.is_self ?? raw.self)
+  };
+}
+
+function normalizeCommunityTournament(raw: JsonRecord): CommunityTournament {
+  const contributor = raw.contributor && typeof raw.contributor === "object" ? raw.contributor as JsonRecord : {};
+  return {
+    ...normalizeTournament({
+      ...raw,
+      id: raw.id ?? raw.public_id,
+      buy_in: raw.buy_in ?? raw.total_buyin,
+      hands_count: raw.hands_count ?? raw.total_hands,
+      player_count: raw.player_count ?? raw.registered_players,
+      chipev: raw.chipev ?? raw.chip_delta
+    }),
+    players: undefined,
+    contributor_id: string(raw.contributor_id ?? contributor.id),
+    contributor_display_name: string(raw.contributor_display_name ?? raw.display_name ?? contributor.display_name ?? contributor.name, "Contributeur")
+  };
+}
+
+function normalizeCommunityHand(raw: JsonRecord): CommunityHand {
+  const contributor = raw.contributor && typeof raw.contributor === "object" ? raw.contributor as JsonRecord : {};
+  return {
+    ...normalizeHand({
+      ...raw,
+      id: raw.id ?? raw.public_id,
+      hand_id: raw.hand_id ?? raw.hand_number,
+      position: raw.position ?? raw.hero_position,
+      players_count: raw.players_count ?? raw.active_players,
+      pot: raw.pot ?? raw.total_pot,
+      net_result_chips: raw.net_result_chips ?? raw.hero_net,
+      showdown: raw.showdown ?? raw.reached_showdown
+    }),
+    contributor_id: string(raw.contributor_id ?? contributor.id),
+    contributor_display_name: string(raw.contributor_display_name ?? raw.display_name ?? contributor.display_name ?? contributor.name, "Contributeur"),
+    replay_key: string(raw.replay_key ?? raw.hand_key ?? raw.public_id) || undefined
   };
 }
 
@@ -509,6 +650,65 @@ export const api = {
   updateSettings: async (settings: AppSettings) => normalizeSettings(await request<JsonRecord>("/settings", { method: "PUT", body: JSON.stringify(settingsPayload(settings)) })),
   importStatus: async () => normalizeImportStatus(await request<JsonRecord>("/import/status")),
   rescan: () => request<ActionResult>("/import/rescan", { method: "POST" }),
+  communityStatus: async () => normalizeCommunityStatus(await request<unknown>("/community/status")),
+  communityJoin: (input: CommunityJoinInput) =>
+    request<unknown>("/community/join", { method: "POST", body: JSON.stringify(input) }),
+  communityLeave: () => request<CommunityLeaveResult>("/community/leave", { method: "DELETE" }),
+  communitySync: () => request<ActionResult>("/community/sync", { method: "POST" }),
+  communityContributors: async () =>
+    communityItems(await request<unknown>("/community/contributors")).map(normalizeCommunityContributor),
+  communityDashboard: async (filters?: ListFilters): Promise<CommunityDashboard> => {
+    const raw = communityRecord(await request<unknown>(`/community/dashboard${queryString({ contributor_id: filters?.contributor_id })}`));
+    const summary = raw.summary && typeof raw.summary === "object" ? raw.summary as JsonRecord : raw;
+    return {
+      tournaments_count: number(summary.tournaments_count ?? summary.tournaments ?? summary.games),
+      hands_count: number(summary.hands_count ?? summary.hands),
+      contributors_count: number(summary.contributors_count ?? summary.contributors),
+      total_buy_ins: number(summary.total_buy_ins ?? summary.total_buyins ?? summary.total_buyin),
+      total_winnings: number(summary.total_winnings ?? summary.winnings ?? summary.total_reward),
+      net_result: number(summary.net_result ?? summary.net),
+      roi: number(summary.roi ?? summary.roi_percent),
+      itm: number(summary.itm ?? summary.itm_percent),
+      win_rate: number(summary.win_rate ?? summary.win_rate_percent)
+    };
+  },
+  communityTournaments: async (filters?: ListFilters): Promise<ApiPage<CommunityTournament>> => {
+    const { page, pageSize, offset } = pagination(filters);
+    const response = await request<unknown>(`/community/tournaments${queryString({
+      contributor_id: filters?.contributor_id,
+      limit: pageSize,
+      offset
+    })}`);
+    const payload = communityRecord(response);
+    const items = communityItems(response).map(normalizeCommunityTournament);
+    return { items, total: number(payload.total, items.length), page, page_size: pageSize };
+  },
+  communityHands: async (filters?: ListFilters): Promise<ApiPage<CommunityHand>> => {
+    const { page, pageSize, offset } = pagination(filters, 30);
+    const response = await request<unknown>(`/community/hands${queryString({
+      contributor_id: filters?.contributor_id,
+      limit: pageSize,
+      offset
+    })}`);
+    const payload = communityRecord(response);
+    const items = communityItems(response).map(normalizeCommunityHand);
+    return { items, total: number(payload.total, items.length), page, page_size: pageSize };
+  },
+  communityReplay: async (handKey: number | string, contributorId?: string) => {
+    const response = await request<unknown>(`/community/replay/${encodeURIComponent(handKey)}${queryString({ contributor_id: contributorId })}`);
+    const envelope = communityRecord(response);
+    const replay = envelope.replay && typeof envelope.replay === "object" ? envelope.replay as JsonRecord : {};
+    return normalizeReplay({
+      ...envelope,
+      ...replay,
+      id: envelope.public_id ?? replay.id,
+      hand_id: envelope.hand_number ?? replay.hand_id,
+      tournament_id: envelope.tournament_id ?? replay.tournament_id,
+      played_at: envelope.played_at ?? replay.played_at,
+      hero_net: envelope.hero_net ?? replay.hero_net,
+      total_pot: envelope.total_pot ?? replay.total_pot
+    }, true);
+  },
   contributionPreview: () => request<ContributionPreview>("/contributions/preview"),
   backupDatabase: () => request<ActionResult>("/database/backup", { method: "POST" }),
   listBackups: async () => {

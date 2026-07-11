@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas.api import AnalyzerSettings
 from app.services.importer import import_pair
+from app.services.settings import save_settings
 
 
 FIXTURES = Path(__file__).parents[2] / "fixtures"
@@ -35,8 +36,38 @@ def test_empty_database_dashboard_and_health() -> None:
         assert data["ev_curve"] == []
 
 
+def test_local_http_security_headers_and_browser_origin_guard(db) -> None:
+    save_settings(db, AnalyzerSettings(history_paths=[], hero_name=""))
+    with TestClient(app) as client:
+        response = client.get("/api/health")
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["referrer-policy"] == "no-referrer"
+        assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+        rejected = client.post(
+            "/api/import/rescan",
+            headers={"Origin": "https://malicious.example"},
+        )
+        assert rejected.status_code == 403
+        assert rejected.headers["x-frame-options"] == "DENY"
+
+        fetch_metadata_rejected = client.post(
+            "/api/import/rescan",
+            headers={"Sec-Fetch-Site": "cross-site"},
+        )
+        assert fetch_metadata_rejected.status_code == 403
+
+        allowed = client.post(
+            "/api/import/rescan",
+            headers={"Origin": "http://127.0.0.1:8000"},
+        )
+        assert allowed.status_code == 200
+
+
 def test_dashboard_tournaments_hands_sessions_and_replayer(db) -> None:
     settings = AnalyzerSettings(history_paths=[], hero_name="HERO")
+    save_settings(db, settings)
     result = import_pair(
         db,
         FIXTURES / "expresso_synthetic_hands.txt",

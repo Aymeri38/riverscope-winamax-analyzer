@@ -45,17 +45,17 @@ export function ContributionPanel() {
 
   return (
     <SectionCard
-      title="Contribution volontaire au projet"
-      subtitle="Préparez un paquet minimisé et agrégé pour améliorer la compatibilité et la couverture de l’analyseur."
+      title="Export agrégé volontaire"
+      subtitle="Outil indépendant du hub communautaire : préparez manuellement un paquet minimisé pour améliorer la compatibilité de RiverScope."
       className="settings-section contribution-panel"
     >
       <div className="contribution-intro">
         <ShieldCheck aria-hidden="true" />
         <div>
-          <strong>Aucune collecte ni aucun envoi automatique</strong>
+          <strong>Ce panneau ne pilote pas la synchronisation communautaire</strong>
           <p>
             L’aperçu est généré uniquement à votre demande par le backend local sur <code>127.0.0.1</code>.
-            Vous voyez l’intégralité du fichier avant de décider de l’enregistrer. Sa transmission reste entièrement manuelle.
+            Vous voyez l’intégralité du fichier agrégé avant de décider de l’enregistrer. Cet export séparé reste volontaire et sa transmission reste manuelle, même lorsqu’un hub communautaire est configuré.
           </p>
         </div>
       </div>
@@ -127,7 +127,7 @@ export function ContributionPanel() {
             />
             <span>
               <strong>Consentement ponctuel</strong>
-              <small>J’ai examiné l’intégralité du contenu ci-dessus et je souhaite créer ce fichier. Je comprends que sa transmission restera manuelle.</small>
+              <small>J’ai examiné l’intégralité de cet export agrégé et je souhaite créer ce fichier local. Cette action est distincte de la synchronisation obligatoire d’un hub configuré.</small>
             </span>
           </label>
 

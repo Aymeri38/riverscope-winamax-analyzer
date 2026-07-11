@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 
 from app.models import Setting
 from app.schemas.api import AnalyzerSettings
+from app.schemas.community import CommunityLocalConfig
 
 
 SETTINGS_KEY = "analyzer"
+COMMUNITY_SETTINGS_KEY = "community"
 
 
 def _detected_default_paths() -> list[str]:
@@ -68,3 +70,31 @@ def save_settings(db: Session, value: AnalyzerSettings) -> AnalyzerSettings:
         row.value_json = value.model_dump_json()
     db.commit()
     return value
+
+
+def load_community_config(db: Session) -> CommunityLocalConfig:
+    row = db.scalar(select(Setting).where(Setting.key == COMMUNITY_SETTINGS_KEY))
+    if row is None:
+        return CommunityLocalConfig()
+    try:
+        return CommunityLocalConfig.model_validate_json(row.value_json)
+    except (ValueError, json.JSONDecodeError):
+        return CommunityLocalConfig()
+
+
+def save_community_config(db: Session, value: CommunityLocalConfig) -> CommunityLocalConfig:
+    row = db.scalar(select(Setting).where(Setting.key == COMMUNITY_SETTINGS_KEY))
+    if row is None:
+        row = Setting(key=COMMUNITY_SETTINGS_KEY, value_json=value.model_dump_json())
+        db.add(row)
+    else:
+        row.value_json = value.model_dump_json()
+    db.commit()
+    return value
+
+
+def delete_community_config(db: Session) -> None:
+    row = db.scalar(select(Setting).where(Setting.key == COMMUNITY_SETTINGS_KEY))
+    if row is not None:
+        db.delete(row)
+        db.commit()

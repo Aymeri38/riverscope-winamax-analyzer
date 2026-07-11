@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 from collections.abc import Callable
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.api.router import router
 from app.core.config import config
+from app.core.http_security import LocalHttpSecurityMiddleware
 from app.core.process_guard import (
     AnalysisForbiddenError,
     AnalysisInterlock,
@@ -25,6 +27,7 @@ from app.core.process_guard import (
     require_winamax_absent,
 )
 from app.database import initialize_database
+from app.services.community_client import CommunityClient
 from app.workers.history_watcher import HistoryWatcher
 
 
@@ -82,7 +85,7 @@ async def lifespan(app: FastAPI):
         app.state.process_guard_monitor = monitor
 
         if os.environ.get("WXA_DISABLE_WATCHER", "0") != "1":
-            watcher = HistoryWatcher()
+            watcher = HistoryWatcher(community_client=app.state.community_client)
             require_winamax_absent(detector=detector, interlock=interlock)
             watcher.start()
         app.state.history_watcher = watcher
@@ -109,6 +112,7 @@ app.state.process_probe = is_winamax_running
 app.state.analysis_interlock = analysis_interlock
 app.state.request_backend_shutdown = None
 app.state.process_guard_shutdown_requested = False
+app.state.community_client = CommunityClient()
 
 
 @app.middleware("http")
@@ -119,24 +123,56 @@ async def reject_after_safety_trip(request, call_next):  # type: ignore[no-untyp
         )
         interlock.ensure_allowed()
     except AnalysisForbiddenError:
+        headers = {}
+        if request.url.path.startswith("/api/community"):
+            headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
         return JSONResponse(
             status_code=503,
             content={
                 "detail": "Analyseur arrêté par le verrou de sécurité Winamax.exe."
             },
+            headers=headers,
         )
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/community"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
+allowed_origins = [
+    f"http://127.0.0.1:{config.port}",
+    f"http://localhost:{config.port}",
+]
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "testserver"])
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type"],
 )
+app.add_middleware(LocalHttpSecurityMiddleware, allowed_origins=allowed_origins)
 app.include_router(router)
+
+
+@app.exception_handler(RequestValidationError)
+async def sanitized_community_validation_error(request, exc):  # type: ignore[no-untyped-def]
+    if not request.url.path.startswith("/api/community"):
+        from fastapi.exception_handlers import request_validation_exception_handler
+
+        return await request_validation_exception_handler(request, exc)
+    # FastAPI's default validation body echoes rejected input. Community join
+    # input can contain an invitation, so only structural diagnostics are returned.
+    details = [
+        {"loc": list(error.get("loc", ())), "msg": error.get("msg"), "type": error.get("type")}
+        for error in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content={"detail": details},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 if config.frontend_dist.is_dir():
