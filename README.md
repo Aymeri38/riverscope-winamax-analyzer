@@ -4,6 +4,8 @@ Application locale d’analyse **post-session** des tournois Expresso Winamax. E
 
 Projet indépendant, non affilié à Winamax.
 
+Distribué sous [licence MIT](LICENSE).
+
 ## Protection absolue contre l’assistance en direct
 
 Cette application n’est ni un HUD ni un outil d’aide pendant le jeu. Elle :
