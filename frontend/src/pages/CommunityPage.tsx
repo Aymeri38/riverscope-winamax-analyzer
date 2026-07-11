@@ -11,9 +11,12 @@ import {
   Search,
   Server,
   ShieldCheck,
+  UserRoundSearch,
   Users
 } from "lucide-react";
+import { CommunityOpponents } from "../components/CommunityOpponents";
 import { HandReplayer } from "../components/HandReplayer";
+import { CommunityContributorProfileView } from "../components/CommunityContributorProfile";
 import { EmptyState, ErrorState, LoadingState, MetricCard, PageHeader, Pagination, SectionCard, StatusPill } from "../components/Ui";
 import { useSafety } from "../contexts/SafetyContext";
 import { useApi } from "../hooks/useApi";
@@ -21,8 +24,8 @@ import { api } from "../services/api";
 import type { CommunityHand, CommunityStatus } from "../types";
 import { formatDate, formatDuration, formatMoney, formatNumber, joinCards } from "../utils/format";
 
-const CONSENT_VERSION = "1";
-type CommunityView = "overview" | "tournaments" | "hands";
+const CONSENT_VERSION = "2";
+type CommunityView = "overview" | "tournaments" | "hands" | "opponents";
 
 function syncTone(state: string): "positive" | "negative" | "warning" | "info" | "neutral" {
   if (["synced", "success", "complete", "up_to_date"].includes(state)) return "positive";
@@ -56,6 +59,9 @@ function blockedReasonLabel(reason?: string | null): string {
     hub_offline: "Le serveur hôte du hub est actuellement injoignable.",
     activity_detected: "Une activité potentiellement en cours a été détectée ; l’accès reste fermé par précaution.",
     winamax_running: "Winamax.exe est détecté ; le backend communautaire reste arrêté.",
+    consent_required: "Le consentement communautaire v2 doit être accepté explicitement avant tout suivi adverse.",
+    consent_upgrade_required: "Le consentement communautaire v2 doit être accepté explicitement avant tout suivi adverse.",
+    policy_upgrade_required: "Le consentement communautaire v2 doit être accepté explicitement avant tout suivi adverse.",
     not_configured: "Cette installation n’est pas encore associée à un hub."
   };
   return reason ? labels[reason] ?? "Le backend a bloqué l’accès communautaire par précaution." : "Le service communautaire n’est pas disponible dans l’état actuel.";
@@ -66,7 +72,7 @@ export function CommunityPage() {
   const [status, setStatus] = useState<CommunityStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(true);
   const [statusError, setStatusError] = useState<Error | null>(null);
-  const [actionLoading, setActionLoading] = useState<"join" | "sync" | "leave" | null>(null);
+  const [actionLoading, setActionLoading] = useState<"join" | "sync" | "leave" | "consent" | null>(null);
   const [actionError, setActionError] = useState("");
   const [view, setView] = useState<CommunityView>("overview");
   const [contributorId, setContributorId] = useState("");
@@ -103,6 +109,12 @@ export function CommunityPage() {
     () => configured ? api.communityDashboard({ contributor_id: contributorId }) : Promise.resolve(null),
     [configured, contributorId, dataRevision]
   );
+  const contributorProfile = useApi(
+    () => configured && contributorId
+      ? api.communityContributorProfile(contributorId)
+      : Promise.resolve(null),
+    [configured, contributorId, dataRevision]
+  );
   const tournaments = useApi(
     () => configured ? api.communityTournaments({ contributor_id: contributorId, page: tournamentsPage, page_size: 25 }) : Promise.resolve({ items: [], total: 0, page: 1, page_size: 25 }),
     [configured, contributorId, tournamentsPage, dataRevision]
@@ -119,6 +131,7 @@ export function CommunityPage() {
 
   function selectContributor(value: string) {
     setContributorId(value);
+    if (value) setView("overview");
     setTournamentsPage(1);
     setHandsPage(1);
   }
@@ -156,10 +169,57 @@ export function CommunityPage() {
     }
   }
 
+  async function acceptOpponentTracking() {
+    setActionLoading("consent");
+    setActionError("");
+    try {
+      await api.communityConsent();
+      await loadStatus(true);
+      setDataRevision((current) => current + 1);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "Mise à jour du consentement impossible.");
+    } finally {
+      setActionLoading(null);
+    }
+  }
+
   if (statusLoading && !status) return <LoadingState label="Vérification de la configuration communautaire…" />;
   if (statusError) return <ErrorState error={statusError} retry={() => void loadStatus(true)} />;
   if (!status?.configured) {
     return <CommunityOnboarding onJoined={() => void loadStatus(true)} busy={actionLoading === "join"} setBusy={(busy) => setActionLoading(busy ? "join" : null)} />;
+  }
+  if (status.consent_upgrade_required) {
+    return (
+      <>
+        <PageHeader
+          eyebrow="Consentement communautaire v2 requis"
+          title="Le suivi adverse change la portée du partage"
+          description="Aucune donnée communautaire n’est chargée tant que vous n’avez pas accepté explicitement cette nouvelle politique."
+        />
+        <section className="community-consent-upgrade" aria-labelledby="community-consent-v2-title">
+          <div className="community-consent-upgrade-heading">
+            <ShieldCheck aria-hidden="true" />
+            <div><span>Politique v2</span><h2 id="community-consent-v2-title">Transmission des pseudos adverses après la partie</h2></div>
+          </div>
+          <p>Votre installation a accepté la politique {status.consent_version ?? "antérieure"}. La politique {status.required_consent_version} exige une nouvelle action explicite pour les quatre traitements suivants :</p>
+          <div className="community-consent-upgrade-grid">
+            <article><Database /><div><strong>Tournois terminés uniquement</strong><small>Les pseudos adverses observés sont transmis au VPS seulement avec les données d’un tournoi complètement terminé.</small></div></article>
+            <article><ShieldCheck /><div><strong>Chiffrement au repos</strong><small>Les pseudos affichables sont chiffrés dans le stockage du VPS et ne sont pas conservés en clair dans la base.</small></div></article>
+            <article><Users /><div><strong>Rapprochement entre contributeurs</strong><small>Un même pseudo peut être rapproché entre plusieurs observations et devient visible uniquement aux membres contributeurs autorisés.</small></div></article>
+            <article><Eye /><div><strong>Jamais en direct</strong><small>Aucune lecture, transmission ou consultation n’est permise pendant que Winamax ou une partie potentiellement active est détectée.</small></div></article>
+          </div>
+          <p className="community-consent-upgrade-warning"><AlertTriangle size={17} /> Ce changement reste désactivé tant que vous ne cliquez pas sur le bouton ci-dessous. Il n’existe aucun opt-in implicite.</p>
+          {actionError && <p className="community-action-error" role="alert"><AlertTriangle size={16} />{actionError}</p>}
+          <div className="community-consent-upgrade-actions">
+            <button className="button ghost" type="button" onClick={() => void leaveCommunity()} disabled={actionLoading !== null}><LogOut size={16} /> Quitter le hub</button>
+            <button className="button primary" type="button" onClick={() => void acceptOpponentTracking()} disabled={actionLoading !== null}>
+              {actionLoading === "consent" ? <LoaderCircle className="spin" size={17} /> : <ShieldCheck size={17} />}
+              {actionLoading === "consent" ? "Activation…" : "Accepter et activer le suivi adverse"}
+            </button>
+          </div>
+        </section>
+      </>
+    );
   }
   if (!status.available) {
     return (
@@ -200,7 +260,7 @@ export function CommunityPage() {
         <Server aria-hidden="true" />
         <div>
           <strong>Données centrales stockées sur le serveur de l’hôte du hub</strong>
-          <span>Les fichiers sources et temporaires restent locaux sur chaque PC. Seules des parties entièrement terminées sont synchronisées par les backends ; le navigateur ne contacte jamais directement le hub.</span>
+          <span>Les parties entièrement terminées et les pseudos adverses observés sont synchronisés par les backends. Les pseudos sont chiffrés au repos ; le navigateur ne contacte jamais directement le hub.</span>
         </div>
         <ShieldCheck aria-hidden="true" />
       </div>
@@ -233,7 +293,7 @@ export function CommunityPage() {
 
       {status.sync.mandatory && (
         <p className="community-mandatory-note">
-          <AlertTriangle size={16} aria-hidden="true" /> L’envoi des nouvelles parties terminées est obligatoire pour accéder aux données communes. Aucune main active, aucun fichier incomplet et aucun pseudo adverse brut ne doivent être transmis.
+          <AlertTriangle size={16} aria-hidden="true" /> L’envoi des nouvelles parties terminées est obligatoire. Les pseudos adverses sont transmis uniquement après la fin confirmée du tournoi, chiffrés au repos et visibles seulement des membres contributeurs.
         </p>
       )}
       {(status.sync.last_error || actionError) && <p className="community-action-error" role="alert"><AlertTriangle size={16} />{actionError || status.sync.last_error}</p>}
@@ -242,10 +302,21 @@ export function CommunityPage() {
         <button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")} type="button"><Database size={16} /> Vue d’ensemble</button>
         <button className={view === "tournaments" ? "active" : ""} onClick={() => setView("tournaments")} type="button"><Eye size={16} /> Parties</button>
         <button className={view === "hands" ? "active" : ""} onClick={() => setView("hands")} type="button"><Search size={16} /> Mains</button>
+        <button className={view === "opponents" ? "active" : ""} onClick={() => setView("opponents")} type="button"><UserRoundSearch size={16} /> Adversaires</button>
       </nav>
 
       {view === "overview" && (
-        dashboard.loading ? <LoadingState /> : dashboard.error ? <ErrorState error={dashboard.error} retry={dashboard.reload} /> : dashboard.data ? (
+        contributorId ? (
+          contributorProfile.loading ? (
+            <LoadingState label="Construction de la fiche du contributeur…" />
+          ) : contributorProfile.error ? (
+            <ErrorState error={contributorProfile.error} retry={contributorProfile.reload} />
+          ) : contributorProfile.data ? (
+            <CommunityContributorProfileView profile={contributorProfile.data} />
+          ) : (
+            <EmptyState title="Profil indisponible" description="Aucune statistique consentie n’est disponible pour ce contributeur." />
+          )
+        ) : dashboard.loading ? <LoadingState /> : dashboard.error ? <ErrorState error={dashboard.error} retry={dashboard.reload} /> : dashboard.data ? (
           <div className="community-overview">
             <div className="metrics-grid community-metrics">
               <MetricCard label="Contributeurs" value={formatNumber(dashboard.data.contributors_count)} icon={<Users />} />
@@ -257,7 +328,7 @@ export function CommunityPage() {
               <MetricCard label="ROI" value={`${formatNumber(dashboard.data.roi, 1)} %`} />
               <MetricCard label="ITM" value={`${formatNumber(dashboard.data.itm, 1)} %`} />
             </div>
-            <SectionCard title="Contributeurs" subtitle="Identités choisies pour le hub ; aucun pseudo adverse n’est affiché.">
+            <SectionCard title="Contributeurs" subtitle="Identités choisies par les membres ; le suivi adverse post-session se trouve dans son onglet dédié.">
               {!contributors.data?.length ? <EmptyState title="Aucun contributeur synchronisé" /> : (
                 <div className="community-contributor-grid">
                   {contributors.data.map((contributor) => (
@@ -328,6 +399,10 @@ export function CommunityPage() {
             </section>
           )}
         </div>
+      )}
+
+      {view === "opponents" && (
+        <CommunityOpponents enabled={configured && status.opponent_tracking_enabled} dataRevision={dataRevision} />
       )}
 
       <HandReplayer handId={replayHand?.id ?? null} open={replayHand !== null} onClose={() => setReplayHand(null)} loadReplay={loadCommunityReplay} readOnly />
@@ -402,7 +477,7 @@ function CommunityOnboarding({
       <PageHeader
         eyebrow="Fonction facultative à configurer"
         title="Rejoindre un hub communautaire"
-        description="Partagez uniquement vos parties Expresso terminées avec un groupe autorisé et consultez les résultats de ses membres."
+        description="Partagez vos parties Expresso terminées avec un groupe autorisé, y compris les pseudos adverses observés selon la politique v2."
       />
       <div className="community-storage-banner" role="note">
         <Server aria-hidden="true" />
@@ -417,7 +492,7 @@ function CommunityOnboarding({
             <label>Nom d’affichage<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Ex. Alice" autoComplete="nickname" maxLength={40} required /></label>
             <label className="community-consent">
               <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-              <span><strong>J’accepte la synchronisation obligatoire</strong><small>Pour accéder aux données de tous les membres, mes nouvelles parties terminées et leurs mains seront envoyées automatiquement au hub. Aucune donnée de partie active ne sera envoyée.</small></span>
+              <span><strong>J’accepte la synchronisation communautaire v2</strong><small>Mes parties terminées, leurs mains et les pseudos adverses observés seront transmis au VPS. Les pseudos y sont chiffrés au repos, rapprochés entre contributeurs et visibles seulement aux membres contributeurs. Rien n’est lu ni envoyé pendant Winamax ou une partie active.</small></span>
             </label>
             {error && <p className="community-action-error" role="alert"><AlertTriangle size={16} />{error}</p>}
             <button className="button primary full-width" type="submit" disabled={busy || !consent}>
@@ -430,7 +505,7 @@ function CommunityOnboarding({
             <p><ShieldCheck /><span><strong>Parties terminées seulement</strong><small>Un tournoi incomplet, récent ou sans classement final reste bloqué.</small></span></p>
             <p><Database /><span><strong>Contribution obligatoire</strong><small>L’accès partagé dépend de l’envoi des données terminées du membre.</small></span></p>
             <p><Eye /><span><strong>Lecture seule</strong><small>Les données des autres membres ne modifient jamais votre base d’analyse locale.</small></span></p>
-            <p><Users /><span><strong>Noms adverses exclus</strong><small>Seul le nom d’affichage choisi par chaque contributeur est visible.</small></span></p>
+            <p><Users /><span><strong>Suivi adverse post-session</strong><small>Les pseudos adverses des tournois terminés sont chiffrés au repos et leur observation est partagée entre membres contributeurs.</small></span></p>
           </div>
         </SectionCard>
       </div>

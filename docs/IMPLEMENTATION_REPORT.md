@@ -8,7 +8,7 @@ L’application **RiverScope / Winamax Expresso Analyzer** fournit une chaîne c
 
 La validation publique repose sur des fixtures synthétiques et ne contient aucun volume, résultat, pseudo, chemin, identifiant ou horodatage provenant d’un compte réel.
 
-- **115 tests réussis sous Windows, 3 tests Linux ignorés localement et rejoués par la CI Ubuntu** ;
+- **143 tests réussis sous Windows, 3 tests Linux ignorés localement et rejoués par la CI Ubuntu** ;
 - build React, TypeScript et Vite réussi ;
 - backend et frontend d’analyse liés exclusivement à `127.0.0.1` ; hub lié à loopback par défaut et TLS obligatoire hors loopback ;
 - refus du démarrage et arrêt coordonné validés lorsque `Winamax.exe` est détecté ;
@@ -107,8 +107,10 @@ Capacités livrées :
 - jeton client protégé par Windows DPAPI et inaccessible à React ;
 - synchronisation idempotente par clé HMAC, complétée par un digest de contenu indépendant de l’appareil pour éviter les doublons lors d’un ré-enrôlement, sans identifiant Winamax brut ;
 - liste blanche stricte et rejet des champs supplémentaires ;
-- pseudonyme de contributeur choisi à l’inscription, héros `HERO` et adversaires `OPPONENT_n` réinitialisés par tournoi ;
-- tableau de bord, contributeurs, tournois, mains et replayer partagé filtrables ;
+- pseudonyme de contributeur choisi à l’inscription, héros `HERO` et adversaires `OPPONENT_n` dans les mains/replayers ;
+- politique communautaire v2 avec nouvelle acceptation explicite avant toute collecte persistante des pseudos adverses ;
+- identité adverse HMAC stable, pseudo affichable chiffré AES-256-GCM et clés privées absentes de SQLite/Git ;
+- tableau de bord, fiches globales des contributeurs, profils adverses factuels, tournois, mains et replayer partagé filtrables ;
 - consultation refusée avant une première contribution et tant que le client officiel possède une file locale en attente ;
 - `Cache-Control: no-store`, absence de CORS, `TrustedHost`, taille de corps limitée et pagination ;
 - quotas persistants par membre et limites de débit en mémoire pour enrôlement, synchronisation et autres routes ;
@@ -117,7 +119,13 @@ Capacités livrées :
 
 Les données persistantes communes résident uniquement dans le répertoire configuré du serveur hôte. Les historiques sources et la file technique restent nécessairement sur les PC contributeurs ; les réponses consultées ne sont pas importées dans leur SQLite. Le hub n’envoie aucune donnée à un second service applicatif. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots relèvent cependant de l’hébergeur et doivent être inclus dans le consentement du groupe.
 
-Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle ne crée aucun profil adverse global persistant et reste entièrement post-session.
+Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle reste entièrement post-session.
+
+Le suivi des contributeurs est rattaché au seul UUID d’un membre consentant. Sa fiche agrège exclusivement ses tournois et expose volumes, résultats, places, moyennes, chipEV couvert, courbe quotidienne, limites, multiplicateurs et dix tournois récents. Elle ne renvoie aucune structure adverse. Un membre désactivé disparaît de cette fiche et de toutes les agrégations collectives.
+
+Le suivi adverse est volontairement séparé du payload tournoi v1 afin d’enrichir les tournois déjà présents sans modifier leur digest ni les dupliquer. Après politique v2, le client associe une fois par tournoi terminé chaque pseudo local à `OPPONENT_1` ou `OPPONENT_2`. Le hub normalise le nom, calcule une identité HMAC, chiffre l’affichage et matérialise les observations de mains. Les profils exposent uniquement des statistiques descriptives avec leurs numérateurs et dénominateurs : VPIP, PFR, limp, 3-bet, shove, agressivité, all-in, WTSD et WSD, ventilés par position et profondeur. Ils n’inventent ni résultat financier de tournoi, ni range, ni équité inconnue, ni qualification du joueur.
+
+Les observations d’un membre désactivé sont exclues par jointure lors de chaque requête. Une suppression d’adversaire conserve seulement une empreinte HMAC d’opposition et empêche sa recréation. La durée de rétention est configurable et la purge est une commande administrative explicite. La politique complète se trouve dans `docs/OPPONENT_DATA_POLICY.md`.
 
 La pseudonymisation ne promet pas l’anonymat : chronologie exacte, cartes, actions, montants et résultats restent corrélables. Le modèle de menace fait confiance au compte système du serveur hôte et à ses processus. Enfin, un serveur ne peut pas attester qu’un fork open source n’a pas retiré ses propres gardes ou falsifié les dates envoyées. L’hôte doit donc protéger la base hors synchronisation ou partage réseau, inviter uniquement des membres de confiance et administrer révocations, quotas et sauvegardes.
 
@@ -132,7 +140,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 Résultat validé :
 
 ```text
-115 passed, 3 skipped in 11.61s  # Windows local
+143 passed, 3 skipped in 16.36s  # Windows local
 ```
 
 Couverture fonctionnelle :
@@ -200,6 +208,7 @@ Les identifiants de membres, jetons d’invitation, secrets de périphériques, 
 - option IA désactivée, aperçu pseudonymisé, confirmation obligatoire et aucun fournisseur câblé ;
 - export agrégé avec aperçu intégral, consentement ponctuel, enregistrement local et transmission exclusivement manuelle ;
 - hub avec consentement initial, contribution obligatoire, jeton DPAPI côté client, jetons hashés côté serveur, liste blanche et réponses non mises en cache.
+- suivi adverse v2 avec deux clés serveur distinctes, pseudonymes chiffrés, recherche locale sans pseudo dans l’URL, file obligatoire et suppression anti-recréation.
 
 ## Limites restantes
 
@@ -215,9 +224,12 @@ Les identifiants de membres, jetons d’invitation, secrets de périphériques, 
 10. Le hub est mono-instance SQLite et vise un groupe privé de taille modérée; ce n’est pas une plateforme Internet multi-région.
 11. L’hôte doit administrer certificat, DNS éventuel, pare-feu, sauvegardes et disponibilité du serveur. Le déploiement sans privilèges expose directement un port TLS non privilégié ; une terminaison TLS publique sur 443 et un service système durci nécessitent une intervention `sudo` distincte.
 12. Le hub est volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent alors leur file locale jusqu’à un redémarrage manuel autorisé.
-13. Les alias adverses sont propres à chaque tournoi : les données permettent le suivi global des contributeurs consentants, pas le profilage persistant des adversaires.
-14. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit tableaux filtrés et replayer en lecture seule. Les classifications/profondeurs analytiques restent locales, les stacks du replayer partagé sont statiques et les cartes adverses révélées ne sont pas encore rendues autour de la table.
-15. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.
+13. Les pseudos adverses chiffrés restent des données pseudonymisées et non anonymes. L’hôte doit définir transparence, durée justifiée et traitement des demandes avant un usage élargi.
+14. La perte des clés HMAC/AES rend les noms chiffrés inutilisables; une sauvegarde de base seule est insuffisante et la rotation de clés exige une migration dédiée.
+15. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit fiches contributeur/adversaire, tableaux filtrés et replayer en lecture seule. Les classifications analytiques restent locales et les stacks du replayer partagé sont statiques.
+16. Une correction de pseudo déjà enrichi provoque volontairement un conflit au lieu d’écraser une identité ; le workflow administratif de remplacement reste à développer.
+17. Les profils adverses agrègent encore toutes les observations de l’identité en mémoire ; une matérialisation SQL sera nécessaire avant un volume massif.
+16. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.
 
 ## Démarrage
 

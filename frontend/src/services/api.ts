@@ -4,10 +4,17 @@ import type {
   AppSettings,
   BreakdownRow,
   CommunityContributor,
+  CommunityContributorProfile,
   CommunityDashboard,
   CommunityHand,
   CommunityJoinInput,
   CommunityLeaveResult,
+  CommunityConsentResult,
+  CommunityOpponent,
+  CommunityOpponentAggression,
+  CommunityOpponentProfile,
+  CommunityOpponentRate,
+  CommunityOpponentStatSlice,
   CommunityStatus,
   CommunityTournament,
   ContributionPreview,
@@ -485,6 +492,12 @@ function normalizeCommunityStatus(raw: unknown): CommunityStatus {
   const online = onlineValue === undefined || onlineValue === null ? null : Boolean(onlineValue);
   const pending = number(sync.pending_tournaments ?? sync.pending ?? payload.pending);
   const blockedReason = string(payload.blocked_reason ?? sync.blocked_reason ?? sync.last_error) || null;
+  const configured = Boolean(payload.configured ?? member);
+  const consentVersion = string(payload.consent_version ?? member?.policy_version) || null;
+  const requiredConsentVersion = string(payload.required_consent_version, "2");
+  const opponentTrackingEnabled = Boolean(
+    payload.opponent_tracking_enabled ?? payload.opponent_tracking ?? member?.opponent_tracking_enabled
+  );
   const state = blockedReason || !available
     ? "blocked"
     : online === false
@@ -493,7 +506,7 @@ function normalizeCommunityStatus(raw: unknown): CommunityStatus {
         ? "pending"
         : "synced";
   return {
-    configured: Boolean(payload.configured ?? member),
+    configured,
     available,
     online,
     member: member
@@ -511,6 +524,13 @@ function normalizeCommunityStatus(raw: unknown): CommunityStatus {
       last_error: string(sync.last_error ?? blockedReason) || null
     },
     synced_tournaments: number(payload.synced ?? sync.synced),
+    consent_version: consentVersion,
+    required_consent_version: requiredConsentVersion,
+    opponent_tracking_enabled: opponentTrackingEnabled,
+    consent_upgrade_required: Boolean(
+      payload.consent_upgrade_required
+      ?? (configured && (consentVersion !== requiredConsentVersion || !opponentTrackingEnabled))
+    ),
     blocked_reason: blockedReason
   };
 }
@@ -559,6 +579,228 @@ function normalizeCommunityHand(raw: JsonRecord): CommunityHand {
     contributor_id: string(raw.contributor_id ?? contributor.id),
     contributor_display_name: string(raw.contributor_display_name ?? raw.display_name ?? contributor.display_name ?? contributor.name, "Contributeur"),
     replay_key: string(raw.replay_key ?? raw.hand_key ?? raw.public_id) || undefined
+  };
+}
+
+function normalizeOpponentRate(raw: unknown): CommunityOpponentRate {
+  const value = raw && typeof raw === "object" ? raw as JsonRecord : {};
+  return {
+    made: number(value.made ?? value.count),
+    opportunities: number(value.opportunities ?? value.total),
+    percent: nullableNumber(value.percent ?? value.percentage)
+  };
+}
+
+function normalizeOpponentAggression(raw: unknown, fallback: JsonRecord = {}): CommunityOpponentAggression {
+  const value = raw && typeof raw === "object" ? raw as JsonRecord : {};
+  return {
+    aggressive_actions: number(value.aggressive_actions ?? value.actions ?? fallback.aggression_actions),
+    calls: number(value.calls ?? value.call_actions ?? fallback.call_actions),
+    checks: number(value.checks ?? fallback.check_actions),
+    folds: number(value.folds ?? fallback.fold_actions),
+    opportunities: number(
+      value.opportunities
+      ?? fallback.aggression_opportunities
+      ?? number(value.aggressive_actions ?? value.actions ?? fallback.aggression_actions)
+        + number(value.calls ?? value.call_actions ?? fallback.call_actions)
+        + number(value.checks ?? fallback.check_actions)
+        + number(value.folds ?? fallback.fold_actions)
+    ),
+    frequency_percent: nullableNumber(value.frequency_percent ?? fallback.aggression_frequency_percent),
+    factor: nullableNumber(value.factor ?? fallback.aggression_factor)
+  };
+}
+
+function normalizeOpponentSlice(raw: JsonRecord, label: string): CommunityOpponentStatSlice {
+  return {
+    label,
+    hands: number(raw.hands ?? raw.hands_count),
+    preflop_known_hands: number(raw.preflop_known_hands),
+    net_chips: number(raw.net_chips ?? raw.net),
+    known_net_hands: number(raw.known_net_hands ?? raw.net_opportunities ?? raw.hands ?? raw.hands_count),
+    vpip: normalizeOpponentRate(raw.vpip),
+    pfr: normalizeOpponentRate(raw.pfr),
+    limp: normalizeOpponentRate(raw.limp),
+    three_bet: normalizeOpponentRate(raw.three_bet ?? raw["3bet"]),
+    shove: normalizeOpponentRate(raw.shove),
+    all_in: normalizeOpponentRate(raw.all_in),
+    wtsd: normalizeOpponentRate(raw.wtsd),
+    wsd: normalizeOpponentRate(raw.wsd),
+    aggression: normalizeOpponentAggression(raw.aggression, raw)
+  };
+}
+
+function normalizeCommunityOpponent(raw: JsonRecord): CommunityOpponent {
+  return {
+    id: string(raw.public_id ?? raw.id),
+    display_name: string(raw.display_name ?? raw.name, "Adversaire"),
+    tournaments_count: number(raw.tournaments ?? raw.tournaments_count),
+    hands_count: number(raw.hands ?? raw.hands_count),
+    contributors_count: number(raw.contributors ?? raw.contributors_count),
+    first_seen_at: string(raw.first_seen_at) || null,
+    last_seen_at: string(raw.last_seen_at) || null
+  };
+}
+
+function normalizeCommunityOpponentProfile(raw: unknown): CommunityOpponentProfile {
+  const payload = communityRecord(raw);
+  const identity = payload.identity && typeof payload.identity === "object"
+    ? payload.identity as JsonRecord
+    : payload.opponent && typeof payload.opponent === "object" ? payload.opponent as JsonRecord : {};
+  const summaryRaw = payload.summary && typeof payload.summary === "object" ? payload.summary as JsonRecord : {};
+  const byPosition = Array.isArray(payload.by_position) ? payload.by_position as JsonRecord[] : [];
+  const byDepth = Array.isArray(payload.by_depth) ? payload.by_depth as JsonRecord[] : [];
+  const observations = Array.isArray(payload.recent_observations)
+    ? payload.recent_observations as JsonRecord[]
+    : [];
+  return {
+    opponent: {
+      public_id: string(identity.public_id ?? identity.id),
+      display_name: string(identity.display_name ?? identity.name, "Adversaire"),
+      first_seen_at: string(identity.first_seen_at) || null,
+      last_seen_at: string(identity.last_seen_at) || null
+    },
+    summary: {
+      ...normalizeOpponentSlice(summaryRaw, "Global"),
+      tournaments: number(summaryRaw.tournaments ?? summaryRaw.tournaments_count),
+      contributors: number(summaryRaw.contributors ?? summaryRaw.contributors_count)
+    },
+    by_position: byPosition.map((row, index) =>
+      normalizeOpponentSlice(row, string(row.position, `Position ${index + 1}`))
+    ),
+    by_depth: byDepth.map((row, index) =>
+      normalizeOpponentSlice(row, string(row.bucket ?? row.depth, `Profondeur ${index + 1}`))
+    ),
+    recent_observations: observations.map((row) => ({
+      hand_id: string(row.hand_id ?? row.hand_public_id),
+      tournament_id: string(row.tournament_id ?? row.tournament_public_id),
+      played_at: string(row.played_at),
+      position: string(row.position) || null,
+      stack_bb: nullableNumber(row.stack_bb),
+      invested: number(row.invested),
+      won: number(row.won),
+      net: nullableNumber(row.net),
+      showed: Boolean(row.showed),
+      is_winner: Boolean(row.is_winner),
+      is_all_in: Boolean(row.is_all_in),
+      preflop_known: Boolean(row.preflop_known),
+      vpip: Boolean(row.vpip),
+      pfr: Boolean(row.pfr),
+      limp: Boolean(row.limp),
+      three_bet: Boolean(row.three_bet ?? row["3bet"]),
+      shove: Boolean(row.shove),
+      postflop_aggressive_actions: number(row.postflop_aggressive_actions),
+      postflop_calls: number(row.postflop_calls),
+      saw_flop: Boolean(row.saw_flop),
+      went_showdown: Boolean(row.went_showdown),
+      won_showdown: Boolean(row.won_showdown)
+    }))
+  };
+}
+
+function normalizeCommunityProfileBreakdown(
+  raw: JsonRecord,
+  kind: "currency" | "limit" | "multiplier",
+  index: number
+): CommunityContributorProfile["by_limit"][number] {
+  const currency = string(raw.currency, "EUR").toUpperCase();
+  const rawValue = kind === "limit"
+    ? raw.buyin ?? raw.buy_in ?? raw.total_buyin
+    : kind === "multiplier" ? raw.multiplier : currency;
+  const fallbackLabel = rawValue === undefined || rawValue === null
+    ? `${kind === "limit" ? "Limite" : "Multiplicateur"} ${index + 1}`
+    : kind === "currency"
+      ? currency
+      : kind === "limit" ? `${number(rawValue)} ${currency}` : `×${number(rawValue)} · ${currency}`;
+  return {
+    label: string(raw.label, fallbackLabel),
+    currency,
+    buyin: nullableNumber(raw.buyin ?? raw.buy_in ?? raw.total_buyin),
+    multiplier: nullableNumber(raw.multiplier),
+    games: number(raw.games ?? raw.tournaments_count ?? raw.tournaments),
+    hands: number(raw.hands ?? raw.hands_count),
+    total_buyins: number(raw.total_buyins ?? raw.total_buy_ins ?? raw.total_buyin),
+    total_winnings: number(raw.total_winnings ?? raw.winnings ?? raw.total_reward),
+    net_result: number(raw.net_result ?? raw.net),
+    roi_percent: number(raw.roi_percent ?? raw.roi),
+    wins: number(raw.wins ?? raw.first_places),
+    win_rate_percent: number(raw.win_rate_percent ?? raw.win_rate),
+    itm_count: number(raw.itm_count),
+    itm_percent: number(raw.itm_percent ?? raw.itm),
+    average_net: number(raw.average_net ?? raw.average_gain),
+    chip_ev_per_game: nullableNumber(raw.chip_ev_per_game ?? raw.chipev_per_game),
+    chip_ev_games: number(raw.chip_ev_games ?? raw.chipev_games),
+    chip_ev_coverage_percent: number(raw.chip_ev_coverage_percent ?? raw.chipev_coverage)
+  };
+}
+
+function normalizeCommunityContributorProfile(raw: unknown): CommunityContributorProfile {
+  const payload = communityRecord(raw);
+  const contributor = payload.contributor && typeof payload.contributor === "object"
+    ? payload.contributor as JsonRecord
+    : {};
+  const summary = payload.summary && typeof payload.summary === "object"
+    ? payload.summary as JsonRecord
+    : {};
+  const publicId = string(contributor.public_id ?? contributor.id);
+  const displayName = string(contributor.display_name ?? contributor.name, "Contributeur");
+  const byCurrency = Array.isArray(payload.by_currency) ? payload.by_currency as JsonRecord[] : [];
+  const byLimit = Array.isArray(payload.by_limit) ? payload.by_limit as JsonRecord[] : [];
+  const byMultiplier = Array.isArray(payload.by_multiplier) ? payload.by_multiplier as JsonRecord[] : [];
+  const trend = Array.isArray(payload.trend) ? payload.trend as JsonRecord[] : [];
+  const recent = Array.isArray(payload.recent_tournaments)
+    ? payload.recent_tournaments as JsonRecord[]
+    : [];
+  return {
+    contributor: {
+      public_id: publicId,
+      display_name: displayName,
+      joined_at: string(contributor.joined_at) || null
+    },
+    summary: {
+      games: number(summary.games ?? summary.tournaments_count),
+      hands: number(summary.hands ?? summary.hands_count),
+      currency: string(summary.currency).toUpperCase() || null,
+      total_buyins: nullableNumber(summary.total_buyins ?? summary.total_buy_ins),
+      total_winnings: nullableNumber(summary.total_winnings ?? summary.winnings),
+      net_result: nullableNumber(summary.net_result ?? summary.net),
+      roi_percent: nullableNumber(summary.roi_percent ?? summary.roi),
+      wins: number(summary.wins ?? summary.first_places),
+      second_places: number(summary.second_places),
+      third_places: number(summary.third_places),
+      win_rate_percent: number(summary.win_rate_percent ?? summary.win_rate),
+      second_place_percent: number(summary.second_place_percent ?? summary.second_place_rate),
+      third_place_percent: number(summary.third_place_percent ?? summary.third_place_rate),
+      itm_count: number(summary.itm_count),
+      itm_percent: number(summary.itm_percent ?? summary.itm),
+      average_buyin: nullableNumber(summary.average_buyin ?? summary.average_buy_in),
+      average_winnings: nullableNumber(summary.average_winnings),
+      average_net: nullableNumber(summary.average_net ?? summary.average_gain),
+      average_duration_seconds: number(summary.average_duration_seconds),
+      average_hands: number(summary.average_hands),
+      chip_ev_per_game: nullableNumber(summary.chip_ev_per_game ?? summary.chipev_per_game),
+      chip_ev_games: number(summary.chip_ev_games ?? summary.chipev_games),
+      chip_ev_coverage_percent: number(summary.chip_ev_coverage_percent ?? summary.chipev_coverage),
+      first_game_at: string(summary.first_game_at) || null,
+      last_game_at: string(summary.last_game_at) || null
+    },
+    by_currency: byCurrency.map((row, index) => normalizeCommunityProfileBreakdown(row, "currency", index)),
+    by_limit: byLimit.map((row, index) => normalizeCommunityProfileBreakdown(row, "limit", index)),
+    by_multiplier: byMultiplier.map((row, index) => normalizeCommunityProfileBreakdown(row, "multiplier", index)),
+    trend: trend.map((row) => ({
+      date: string(row.date ?? row.label),
+      currency: string(row.currency, "EUR").toUpperCase(),
+      games: number(row.games),
+      total_buyins: number(row.total_buyins ?? row.total_buy_ins),
+      total_winnings: number(row.total_winnings),
+      net_result: number(row.net_result ?? row.net),
+      cumulative_net: number(row.cumulative_net ?? row.cumulative)
+    })),
+    recent_tournaments: recent.map((row) => ({
+      ...normalizeCommunityTournament(row),
+      contributor_id: string(row.contributor_id, publicId),
+      contributor_display_name: string(row.contributor_display_name, displayName)
+    }))
   };
 }
 
@@ -653,10 +895,33 @@ export const api = {
   communityStatus: async () => normalizeCommunityStatus(await request<unknown>("/community/status")),
   communityJoin: (input: CommunityJoinInput) =>
     request<unknown>("/community/join", { method: "POST", body: JSON.stringify(input) }),
+  communityConsent: () => request<CommunityConsentResult>("/community/consent", {
+    method: "POST",
+    body: JSON.stringify({ consent: true, policy_version: "2" })
+  }),
   communityLeave: () => request<CommunityLeaveResult>("/community/leave", { method: "DELETE" }),
   communitySync: () => request<ActionResult>("/community/sync", { method: "POST" }),
   communityContributors: async () =>
     communityItems(await request<unknown>("/community/contributors")).map(normalizeCommunityContributor),
+  communityContributorProfile: async (publicId: string) =>
+    normalizeCommunityContributorProfile(
+      await request<unknown>(`/community/contributors/${encodeURIComponent(publicId)}/profile`)
+    ),
+  communityOpponents: async (page = 1, pageSize = 25): Promise<ApiPage<CommunityOpponent>> => {
+    const safePage = Math.max(1, page);
+    const safePageSize = Math.max(1, pageSize);
+    const response = await request<unknown>(`/community/opponents${queryString({
+      limit: safePageSize,
+      offset: (safePage - 1) * safePageSize
+    })}`);
+    const payload = communityRecord(response);
+    const items = communityItems(response).map(normalizeCommunityOpponent);
+    return { items, total: number(payload.total, items.length), page: safePage, page_size: safePageSize };
+  },
+  communityOpponentProfile: async (publicId: string) =>
+    normalizeCommunityOpponentProfile(
+      await request<unknown>(`/community/opponents/${encodeURIComponent(publicId)}/profile`)
+    ),
   communityDashboard: async (filters?: ListFilters): Promise<CommunityDashboard> => {
     const raw = communityRecord(await request<unknown>(`/community/dashboard${queryString({ contributor_id: filters?.contributor_id })}`));
     const summary = raw.summary && typeof raw.summary === "object" ? raw.summary as JsonRecord : raw;

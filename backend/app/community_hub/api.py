@@ -13,11 +13,24 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.community_hub.config import HubConfig, MAX_BODY_BYTES, get_hub_config
 from app.community_hub.database import HubDatabase
 from app.community_hub.middleware import BodySizeLimitMiddleware, NoStoreMiddleware
-from app.community_hub.models import Device, Member, SharedHand, SharedTournament
+from app.community_hub.models import Device, Member, Opponent, SharedHand, SharedTournament
+from app.community_hub.opponent_identity import OpponentIdentityError, OpponentIdentityService
+from app.community_hub.opponents import (
+    list_opponents,
+    opponent_profile,
+    sync_tournament_opponents,
+)
 from app.community_hub.rate_limit import HubRateLimitMiddleware, InMemoryRateLimiter
 from app.community_hub.schemas import (
+    ContributorProfileResponse,
+    ConsentUpgradeRequest,
+    ConsentUpgradeResponse,
     EnrollRequest,
     EnrollResponse,
+    OpponentListResponse,
+    OpponentProfileResponse,
+    OpponentSyncRequest,
+    OpponentSyncResponse,
     SyncTournamentRequest,
     SyncTournamentResponse,
 )
@@ -25,12 +38,15 @@ from app.community_hub.security import (
     AuthenticatedDevice,
     authenticate_device,
     get_hub_db,
+    require_collective_access,
     require_contribution,
+    require_opponent_policy,
     utcnow_naive,
 )
 from app.community_hub.service import (
     HAND_WITH_RELATIONS,
     TOURNAMENT_WITH_RELATIONS,
+    contributor_profile,
     contributor_id_to_internal,
     dashboard,
     enroll,
@@ -73,10 +89,41 @@ def create_hub_app(
     )
     app.state.hub_database = database
     app.state.hub_config = config
+    app.state.process_interlock = interlock or analysis_interlock
+    app.state.opponent_identity_service = (
+        OpponentIdentityService(
+            identity_key=config.opponent_identity_key,
+            encryption_key=config.opponent_encryption_key,
+            key_version=config.opponent_key_version,
+        )
+        if config.opponent_tracking_enabled
+        and config.opponent_identity_key is not None
+        and config.opponent_encryption_key is not None
+        else None
+    )
+    if app.state.opponent_identity_service is not None:
+        validation_db = database.session()
+        try:
+            app.state.process_interlock.ensure_allowed()
+            for stored_opponent in validation_db.scalars(select(Opponent)):
+                # The startup monitor is already running.  Check its one-way
+                # latch before every decryption so a Winamax appearance stops
+                # the validation pass instead of waiting for the whole table.
+                app.state.process_interlock.ensure_allowed()
+                app.state.opponent_identity_service.decrypt(
+                    identity_key=stored_opponent.identity_key,
+                    ciphertext=stored_opponent.display_ciphertext,
+                    nonce=stored_opponent.display_nonce,
+                    key_version=stored_opponent.key_version,
+                )
+            app.state.process_interlock.ensure_allowed()
+        except OpponentIdentityError as exc:
+            raise ValueError("Cle de chiffrement adverse incompatible avec la base.") from exc
+        finally:
+            validation_db.close()
     app.state.rate_limiter = InMemoryRateLimiter(
         max_buckets=config.rate_limit_max_buckets
     )
-    app.state.process_interlock = interlock or analysis_interlock
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_BODY_BYTES)
     app.add_middleware(
         TrustedHostMiddleware,
@@ -107,14 +154,20 @@ def create_hub_app(
         return response
 
     @app.post("/v1/enroll", response_model=EnrollResponse, status_code=201)
-    def enroll_route(payload: EnrollRequest, db: Session = Depends(get_hub_db)) -> EnrollResponse:
+    def enroll_route(
+        payload: EnrollRequest,
+        request: Request,
+        db: Session = Depends(get_hub_db),
+    ) -> EnrollResponse:
+        if payload.policy_version == "2" and not request.app.state.hub_config.opponent_tracking_enabled:
+            raise HTTPException(status_code=503, detail="Suivi adverse indisponible.")
         member, device, raw_token = enroll(db, payload)
         return EnrollResponse(
             member_id=member.public_id,
             device_id=device.public_id,
             device_token=raw_token,
             display_name=member.display_name,
-            policy_version="1",
+            policy_version=member.policy_version,
         )
 
     secure = APIRouter(prefix="/v1", dependencies=[Depends(authenticate_device)])
@@ -159,6 +212,7 @@ def create_hub_app(
 
     @secure.get("/me")
     def current_member(
+        request: Request,
         auth: AuthenticatedDevice = Depends(authenticate_device),
         db: Session = Depends(get_hub_db),
     ) -> dict[str, object]:
@@ -174,9 +228,30 @@ def create_hub_app(
             "member_id": member.public_id,
             "display_name": member.display_name,
             "has_contribution": has_contribution,
+            "policy_version": member.policy_version,
+            "opponent_tracking_required": request.app.state.hub_config.opponent_tracking_enabled,
         }
 
-    @secure.get("/contributors", dependencies=[Depends(require_contribution)])
+    @secure.post("/consent", response_model=ConsentUpgradeResponse)
+    def upgrade_consent(
+        payload: ConsentUpgradeRequest,
+        request: Request,
+        auth: AuthenticatedDevice = Depends(authenticate_device),
+        db: Session = Depends(get_hub_db),
+    ) -> ConsentUpgradeResponse:
+        if not request.app.state.hub_config.opponent_tracking_enabled:
+            raise HTTPException(status_code=503, detail="Suivi adverse indisponible.")
+        member = db.get(Member, auth.member_id)
+        if member is None:
+            raise HTTPException(status_code=401, detail="Jeton invalide.")
+        member.policy_version = payload.policy_version
+        member.consented_at = utcnow_naive()
+        db.commit()
+        return ConsentUpgradeResponse(
+            policy_version="2", opponent_tracking_enabled=True
+        )
+
+    @secure.get("/contributors", dependencies=[Depends(require_collective_access)])
     def contributors(db: Session = Depends(get_hub_db)) -> dict[str, object]:
         rows = db.execute(
             select(
@@ -203,7 +278,22 @@ def create_hub_app(
             ]
         }
 
-    @secure.get("/tournaments", dependencies=[Depends(require_contribution)])
+    @secure.get(
+        "/contributors/{public_id}/profile",
+        response_model=ContributorProfileResponse,
+        dependencies=[Depends(require_collective_access)],
+    )
+    def contributor_profile_route(
+        public_id: str,
+        db: Session = Depends(get_hub_db),
+    ) -> ContributorProfileResponse:
+        # The response model is an output allowlist: an accidental player,
+        # action, replay, or opponent field makes response validation fail.
+        return ContributorProfileResponse.model_validate(
+            contributor_profile(db, public_id)
+        )
+
+    @secure.get("/tournaments", dependencies=[Depends(require_collective_access)])
     def tournaments(
         contributor_id: str | None = None,
         limit: int = Query(50, ge=1, le=200),
@@ -239,7 +329,7 @@ def create_hub_app(
         }
 
     @secure.get(
-        "/tournaments/{public_id}", dependencies=[Depends(require_contribution)]
+        "/tournaments/{public_id}", dependencies=[Depends(require_collective_access)]
     )
     def tournament_detail(public_id: str, db: Session = Depends(get_hub_db)) -> dict[str, object]:
         row = db.scalar(
@@ -274,7 +364,7 @@ def create_hub_app(
         ]
         return result
 
-    @secure.get("/hands", dependencies=[Depends(require_contribution)])
+    @secure.get("/hands", dependencies=[Depends(require_collective_access)])
     def hands(
         contributor_id: str | None = None,
         tournament_id: str | None = None,
@@ -323,7 +413,7 @@ def create_hub_app(
         }
 
     @secure.get(
-        "/hands/{public_id}/replay", dependencies=[Depends(require_contribution)]
+        "/hands/{public_id}/replay", dependencies=[Depends(require_collective_access)]
     )
     def replay(public_id: str, db: Session = Depends(get_hub_db)) -> dict[str, object]:
         row = db.scalar(
@@ -339,12 +429,83 @@ def create_hub_app(
             raise HTTPException(status_code=404, detail="Main introuvable.")
         return {**hand_summary(row), "replay": json.loads(row.replay_json)}
 
-    @secure.get("/dashboard", dependencies=[Depends(require_contribution)])
+    @secure.get("/dashboard", dependencies=[Depends(require_collective_access)])
     def dashboard_route(
         contributor_id: str | None = None,
         db: Session = Depends(get_hub_db),
     ) -> dict[str, object]:
         return dashboard(db, contributor_id_to_internal(db, contributor_id))
+
+    def opponent_identity(request: Request) -> OpponentIdentityService:
+        service = request.app.state.opponent_identity_service
+        if not isinstance(service, OpponentIdentityService):
+            raise HTTPException(status_code=503, detail="Suivi adverse indisponible.")
+        return service
+
+    @secure.post(
+        "/sync/tournaments/{public_id}/opponents",
+        response_model=OpponentSyncResponse,
+        dependencies=[
+            Depends(require_contribution),
+            Depends(require_opponent_policy),
+        ],
+    )
+    def sync_opponents_route(
+        public_id: str,
+        payload: OpponentSyncRequest,
+        response: Response,
+        request: Request,
+        auth: AuthenticatedDevice = Depends(authenticate_device),
+        db: Session = Depends(get_hub_db),
+    ) -> OpponentSyncResponse:
+        created, opponent_count, observation_count = sync_tournament_opponents(
+            db,
+            member_id=auth.member_id,
+            tournament_public_id=public_id,
+            request=payload,
+            identity_service=opponent_identity(request),
+            ensure_allowed=request.app.state.process_interlock.ensure_allowed,
+        )
+        response.status_code = 201 if created else 200
+        return OpponentSyncResponse(
+            status="created" if created else "existing",
+            opponent_count=opponent_count,
+            observation_count=observation_count,
+        )
+
+    @secure.get(
+        "/opponents",
+        response_model=OpponentListResponse,
+        dependencies=[Depends(require_collective_access)],
+    )
+    def opponents_route(
+        request: Request,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0, le=1_000_000),
+        db: Session = Depends(get_hub_db),
+    ) -> OpponentListResponse:
+        return OpponentListResponse.model_validate(
+            list_opponents(
+                db,
+                opponent_identity(request),
+                limit=limit,
+                offset=offset,
+            )
+        )
+
+    @secure.get(
+        "/opponents/{public_id}/profile",
+        response_model=OpponentProfileResponse,
+        dependencies=[Depends(require_collective_access)],
+    )
+    def opponent_profile_route(
+        public_id: str,
+        request: Request,
+        db: Session = Depends(get_hub_db),
+    ) -> OpponentProfileResponse:
+        return OpponentProfileResponse.model_validate(
+            opponent_profile(db, public_id, opponent_identity(request))
+        )
 
     app.include_router(secure)
     # Added last so the limiter is the outermost user middleware. It uses the

@@ -436,6 +436,225 @@ def hand_summary(row: SharedHand) -> dict[str, object]:
     }
 
 
+def _profile_percent(numerator: int | Decimal, denominator: int | Decimal) -> float:
+    if not denominator:
+        return 0.0
+    return float(Decimal(numerator) / Decimal(denominator) * 100)
+
+
+def _profile_breakdown(
+    rows: list[SharedTournament],
+    *,
+    currency: str,
+    buyin: Decimal | None = None,
+    multiplier: Decimal | None = None,
+) -> dict[str, object]:
+    games = len(rows)
+    hands = sum(row.total_hands for row in rows)
+    total_buyins = sum((row.total_buyin for row in rows), Decimal("0"))
+    total_winnings = sum((row.reward for row in rows), Decimal("0"))
+    net = total_winnings - total_buyins
+    wins = sum(row.final_rank == 1 for row in rows)
+    itm = sum(row.reward > 0 for row in rows)
+    chip_values = [row.chip_delta for row in rows if row.chip_delta is not None]
+    return {
+        "currency": currency,
+        "buyin": float(buyin) if buyin is not None else None,
+        "multiplier": float(multiplier) if multiplier is not None else None,
+        "games": games,
+        "hands": hands,
+        "total_buyins": float(total_buyins),
+        "total_winnings": float(total_winnings),
+        "net_result": float(net),
+        "roi_percent": _profile_percent(net, total_buyins),
+        "wins": wins,
+        "win_rate_percent": _profile_percent(wins, games),
+        "itm_count": itm,
+        "itm_percent": _profile_percent(itm, games),
+        "average_net": float(net / games) if games else 0.0,
+        "chip_ev_per_game": (
+            float(Decimal(sum(chip_values)) / len(chip_values)) if chip_values else None
+        ),
+        "chip_ev_games": len(chip_values),
+        "chip_ev_coverage_percent": _profile_percent(len(chip_values), games),
+    }
+
+
+def _profile_tournament(row: SharedTournament) -> dict[str, object]:
+    """Return only target-hero tournament data; never hand or opponent data."""
+    return {
+        "public_id": row.public_id,
+        "started_at": _public_datetime(row.started_at),
+        "ended_at": _public_datetime(row.ended_at),
+        "format": row.format,
+        "is_nitro": row.is_nitro,
+        "currency": row.currency,
+        "total_buyin": float(row.total_buyin),
+        "multiplier": float(row.multiplier) if row.multiplier is not None else None,
+        "prize_pool": float(row.prize_pool),
+        "reward": float(row.reward),
+        "net_result": float(row.reward - row.total_buyin),
+        "final_rank": row.final_rank,
+        "duration_seconds": row.duration_seconds,
+        "total_hands": row.total_hands,
+        "registered_players": row.registered_players,
+        "chip_delta": row.chip_delta,
+    }
+
+
+def contributor_profile(
+    db: Session,
+    public_id: str,
+    *,
+    recent_limit: int = 10,
+) -> dict[str, object]:
+    """Build a consented contributor profile, isolated from every other member.
+
+    The query is deliberately rooted in the target member id.  The response is
+    aggregated exclusively from ``SharedTournament`` and never reads replay
+    JSON, player aliases, actions, cards, or another member's rows.
+    """
+    member = db.scalar(
+        select(Member).where(
+            Member.public_id == public_id,
+            Member.disabled_at.is_(None),
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Contributeur introuvable.")
+
+    rows = list(
+        db.scalars(
+            select(SharedTournament)
+            .where(SharedTournament.member_id == member.id)
+            .order_by(SharedTournament.started_at.asc(), SharedTournament.id.asc())
+        )
+    )
+    # Do not expose the identity of an enrolled account that has not actually
+    # contributed.  Such members are intentionally absent from /contributors.
+    if not rows:
+        raise HTTPException(status_code=404, detail="Contributeur introuvable.")
+
+    games = len(rows)
+    hands = sum(row.total_hands for row in rows)
+    total_buyins = sum((row.total_buyin for row in rows), Decimal("0"))
+    total_winnings = sum((row.reward for row in rows), Decimal("0"))
+    net = total_winnings - total_buyins
+    wins = sum(row.final_rank == 1 for row in rows)
+    second_places = sum(row.final_rank == 2 for row in rows)
+    third_places = sum(row.final_rank == 3 for row in rows)
+    itm = sum(row.reward > 0 for row in rows)
+    chip_values = [row.chip_delta for row in rows if row.chip_delta is not None]
+    currencies = sorted({row.currency for row in rows})
+
+    currency_groups: dict[str, list[SharedTournament]] = {}
+    limit_groups: dict[tuple[str, Decimal], list[SharedTournament]] = {}
+    multiplier_groups: dict[
+        tuple[str, Decimal | None], list[SharedTournament]
+    ] = {}
+    day_groups: dict[tuple[str, str], list[SharedTournament]] = {}
+    for row in rows:
+        currency_groups.setdefault(row.currency, []).append(row)
+        limit_groups.setdefault((row.currency, row.total_buyin), []).append(row)
+        multiplier_groups.setdefault((row.currency, row.multiplier), []).append(row)
+        day_groups.setdefault(
+            (row.started_at.date().isoformat(), row.currency), []
+        ).append(row)
+
+    by_currency = [
+        _profile_breakdown(group, currency=currency)
+        for currency, group in sorted(currency_groups.items())
+    ]
+    by_limit = [
+        _profile_breakdown(group, currency=currency, buyin=buyin)
+        for (currency, buyin), group in sorted(
+            limit_groups.items(), key=lambda item: (item[0][0], item[0][1])
+        )
+    ]
+    by_multiplier = [
+        _profile_breakdown(group, currency=currency, multiplier=multiplier)
+        for (currency, multiplier), group in sorted(
+            multiplier_groups.items(),
+            key=lambda item: (
+                item[0][0],
+                item[0][1] is None,
+                item[0][1] if item[0][1] is not None else Decimal("0"),
+            ),
+        )
+    ]
+
+    cumulative_by_currency: dict[str, Decimal] = {}
+    trend: list[dict[str, object]] = []
+    for (day, currency), group in sorted(day_groups.items()):
+        day_buyins = sum((row.total_buyin for row in group), Decimal("0"))
+        day_winnings = sum((row.reward for row in group), Decimal("0"))
+        day_net = day_winnings - day_buyins
+        cumulative_by_currency[currency] = (
+            cumulative_by_currency.get(currency, Decimal("0")) + day_net
+        )
+        trend.append(
+            {
+                "date": day,
+                "currency": currency,
+                "games": len(group),
+                "total_buyins": float(day_buyins),
+                "total_winnings": float(day_winnings),
+                "net_result": float(day_net),
+                "cumulative_net": float(cumulative_by_currency[currency]),
+            }
+        )
+
+    bounded_recent_limit = max(0, min(recent_limit, 10))
+    recent_rows = rows[-bounded_recent_limit:] if bounded_recent_limit else []
+    return {
+        "contributor": {
+            "public_id": member.public_id,
+            "display_name": member.display_name,
+            "joined_at": _public_datetime(member.created_at),
+        },
+        "summary": {
+            "games": games,
+            "hands": hands,
+            "currency": currencies[0] if len(currencies) == 1 else None,
+            "total_buyins": float(total_buyins) if len(currencies) == 1 else None,
+            "total_winnings": float(total_winnings) if len(currencies) == 1 else None,
+            "net_result": float(net) if len(currencies) == 1 else None,
+            "roi_percent": (
+                _profile_percent(net, total_buyins) if len(currencies) == 1 else None
+            ),
+            "wins": wins,
+            "second_places": second_places,
+            "third_places": third_places,
+            "win_rate_percent": _profile_percent(wins, games),
+            "second_place_percent": _profile_percent(second_places, games),
+            "third_place_percent": _profile_percent(third_places, games),
+            "itm_count": itm,
+            "itm_percent": _profile_percent(itm, games),
+            "average_buyin": float(total_buyins / games) if len(currencies) == 1 else None,
+            "average_winnings": (
+                float(total_winnings / games) if len(currencies) == 1 else None
+            ),
+            "average_net": float(net / games) if len(currencies) == 1 else None,
+            "average_duration_seconds": sum(row.duration_seconds for row in rows) / games,
+            "average_hands": hands / games,
+            "chip_ev_per_game": (
+                float(Decimal(sum(chip_values)) / len(chip_values)) if chip_values else None
+            ),
+            "chip_ev_games": len(chip_values),
+            "chip_ev_coverage_percent": _profile_percent(len(chip_values), games),
+            "first_game_at": _public_datetime(rows[0].started_at),
+            "last_game_at": _public_datetime(rows[-1].started_at),
+        },
+        "by_currency": by_currency,
+        "by_limit": by_limit,
+        "by_multiplier": by_multiplier,
+        "trend": trend,
+        "recent_tournaments": [
+            _profile_tournament(row) for row in reversed(recent_rows)
+        ],
+    }
+
+
 def dashboard(db: Session, member_id: int | None) -> dict[str, object]:
     # Revocation retains rows locally for the host but removes them from every
     # collective view; permanent erasure is a separate explicit admin action.

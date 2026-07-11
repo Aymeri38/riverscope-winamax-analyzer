@@ -294,6 +294,10 @@ export interface CommunityStatus {
   member: CommunityMember | null;
   sync: CommunitySyncStatus;
   synced_tournaments: number;
+  consent_version: string | null;
+  required_consent_version: string;
+  opponent_tracking_enabled: boolean;
+  consent_upgrade_required: boolean;
   blocked_reason?: string | null;
 }
 
@@ -309,6 +313,11 @@ export interface CommunityLeaveResult {
   configured: false;
   remote_revoked: boolean;
   message: string;
+}
+
+export interface CommunityConsentResult {
+  policy_version: "2";
+  opponent_tracking_enabled: true;
 }
 
 export interface CommunityContributor {
@@ -332,6 +341,79 @@ export interface CommunityDashboard {
   win_rate: number;
 }
 
+export interface CommunityProfileSummary {
+  games: number;
+  hands: number;
+  currency: string | null;
+  total_buyins: number | null;
+  total_winnings: number | null;
+  net_result: number | null;
+  roi_percent: number | null;
+  wins: number;
+  second_places: number;
+  third_places: number;
+  win_rate_percent: number;
+  second_place_percent: number;
+  third_place_percent: number;
+  itm_count: number;
+  itm_percent: number;
+  average_buyin: number | null;
+  average_winnings: number | null;
+  average_net: number | null;
+  average_duration_seconds: number;
+  average_hands: number;
+  chip_ev_per_game: number | null;
+  chip_ev_games: number;
+  chip_ev_coverage_percent: number;
+  first_game_at: string | null;
+  last_game_at: string | null;
+}
+
+export interface CommunityProfileBreakdown {
+  label: string;
+  currency: string;
+  buyin: number | null;
+  multiplier: number | null;
+  games: number;
+  hands: number;
+  total_buyins: number;
+  total_winnings: number;
+  net_result: number;
+  roi_percent: number;
+  wins: number;
+  win_rate_percent: number;
+  itm_count: number;
+  itm_percent: number;
+  average_net: number;
+  chip_ev_per_game: number | null;
+  chip_ev_games: number;
+  chip_ev_coverage_percent: number;
+}
+
+export interface CommunityProfileTrendPoint {
+  date: string;
+  currency: string;
+  games: number;
+  total_buyins: number;
+  total_winnings: number;
+  net_result: number;
+  cumulative_net: number;
+}
+
+export interface CommunityContributorProfile {
+  contributor: {
+    public_id: string;
+    display_name: string;
+    joined_at: string | null;
+  };
+  summary: CommunityProfileSummary;
+  by_currency: CommunityProfileBreakdown[];
+  by_limit: CommunityProfileBreakdown[];
+  by_multiplier: CommunityProfileBreakdown[];
+  trend: CommunityProfileTrendPoint[];
+  recent_tournaments: CommunityTournament[];
+}
+
 export interface CommunityTournament extends Tournament {
   contributor_id: string;
   contributor_display_name: string;
@@ -341,4 +423,88 @@ export interface CommunityHand extends HandSummary {
   contributor_id: string;
   contributor_display_name: string;
   replay_key?: string;
+}
+
+export interface CommunityOpponent {
+  id: string;
+  display_name: string;
+  tournaments_count: number;
+  hands_count: number;
+  contributors_count: number;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface CommunityOpponentRate {
+  made: number;
+  opportunities: number;
+  percent: number | null;
+}
+
+export interface CommunityOpponentAggression {
+  aggressive_actions: number;
+  calls: number;
+  checks: number;
+  folds: number;
+  opportunities: number;
+  frequency_percent: number | null;
+  factor: number | null;
+}
+
+export interface CommunityOpponentStatSlice {
+  label: string;
+  hands: number;
+  preflop_known_hands: number;
+  net_chips: number;
+  known_net_hands: number;
+  vpip: CommunityOpponentRate;
+  pfr: CommunityOpponentRate;
+  limp: CommunityOpponentRate;
+  three_bet: CommunityOpponentRate;
+  shove: CommunityOpponentRate;
+  all_in: CommunityOpponentRate;
+  wtsd: CommunityOpponentRate;
+  wsd: CommunityOpponentRate;
+  aggression: CommunityOpponentAggression;
+}
+
+export interface CommunityOpponentObservation {
+  hand_id: string;
+  tournament_id: string;
+  played_at: string;
+  position: string | null;
+  stack_bb: number | null;
+  invested: number;
+  won: number;
+  net: number | null;
+  showed: boolean;
+  is_winner: boolean;
+  is_all_in: boolean;
+  preflop_known: boolean;
+  vpip: boolean;
+  pfr: boolean;
+  limp: boolean;
+  three_bet: boolean;
+  shove: boolean;
+  postflop_aggressive_actions: number;
+  postflop_calls: number;
+  saw_flop: boolean;
+  went_showdown: boolean;
+  won_showdown: boolean;
+}
+
+export interface CommunityOpponentProfile {
+  opponent: {
+    public_id: string;
+    display_name: string;
+    first_seen_at: string | null;
+    last_seen_at: string | null;
+  };
+  summary: CommunityOpponentStatSlice & {
+    tournaments: number;
+    contributors: number;
+  };
+  by_position: CommunityOpponentStatSlice[];
+  by_depth: CommunityOpponentStatSlice[];
+  recent_observations: CommunityOpponentObservation[];
 }

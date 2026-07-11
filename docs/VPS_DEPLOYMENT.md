@@ -69,6 +69,30 @@ WXA_COMMUNITY_APPROVAL_REFERENCE='RÉFÉRENCE_RÉELLE_DE_L_ACCORD_ÉCRIT'
 La référence n’est pas un mécanisme cryptographique : elle documente l’accord
 déclaré par l’hôte. Le fichier réel ne doit jamais être ajouté au dépôt Git.
 
+### Activer le suivi adverse post-session
+
+La politique v2 exige deux clés indépendantes de 32 octets. Générer deux valeurs
+avec `openssl rand -base64 32`, les copier directement dans le fichier privé
+`hub.env`, puis effacer le terminal si son historique ou sa capture est conservé :
+
+```dotenv
+WXA_HUB_OPPONENT_TRACKING=YES
+WXA_HUB_OPPONENT_IDENTITY_KEY='PREMIÈRE_VALEUR_BASE64'
+WXA_HUB_OPPONENT_ENCRYPTION_KEY='SECONDE_VALEUR_BASE64'
+WXA_HUB_OPPONENT_KEY_VERSION=1
+WXA_HUB_OPPONENT_RETENTION_DAYS=365
+```
+
+La première clé produit les identités HMAC stables; la seconde chiffre les
+pseudos affichables avec AES-256-GCM. Une clé absente, mal encodée ou de longueur
+incorrecte fait échouer le démarrage avant l’initialisation de la base. Ne jamais
+réutiliser la même valeur pour les deux usages.
+
+Ne jamais changer la clé HMAC après la première collecte sans migrer dans une
+même opération toutes les identités et toutes les empreintes d’opposition. Une
+rotation de la clé AES exige également un rechiffrement préalable de chaque
+pseudo ; cette version n’automatise aucune de ces rotations.
+
 ## Exposition réseau et TLS
 
 Le runner écoute sur `0.0.0.0:8040` seulement avec le certificat et la clé TLS.
@@ -84,7 +108,7 @@ Les emplacements sensibles sont :
 ~/riverscope-hub/certs/community-ca.crt   # certificat public à fournir aux amis
 ~/riverscope-hub/certs/server.key         # clé privée du serveur
 ~/riverscope-hub/certs/server.crt         # certificat serveur
-~/riverscope-hub/secrets/hub.env          # attestation/configuration
+~/riverscope-hub/secrets/hub.env          # attestation et clés du suivi adverse
 ```
 
 Tous sont en mode `0600`; les dossiers privés sont en `0700`. Ne jamais
@@ -133,6 +157,21 @@ GitHub ou un fichier du dépôt. Les opérations disponibles se consultent avec 
 ```bash
 bash ~/riverscope-hub/repository/deploy/vps/admin.sh --help
 ```
+
+Une opposition ou demande de suppression utilise l’UUID public visible dans la
+fiche adverse, sans placer le pseudo dans la ligne de commande :
+
+```bash
+bash ~/riverscope-hub/repository/deploy/vps/admin.sh \
+  suppress-opponent --public-id 'UUID_ADVERSAIRE' --confirm DELETE
+
+bash ~/riverscope-hub/repository/deploy/vps/admin.sh \
+  purge-opponents --retention-days 365
+```
+
+La première commande supprime le profil et conserve seulement une empreinte HMAC
+de suppression afin d’empêcher sa recréation. La seconde applique manuellement
+la rétention aux profils inactifs; aucun cron n’est créé.
 
 ## Démarrer, contrôler et arrêter
 
@@ -215,6 +254,12 @@ Les copies restent dans `~/riverscope-hub/backups`; aucune rotation, réplicatio
 ou sauvegarde distante n’est automatique. Une panne totale du VPS peut donc
 détruire simultanément la base et ces copies. Exporter une sauvegarde hors du VPS
 est une décision manuelle qui change le périmètre de confidentialité.
+
+Une sauvegarde SQLite ne contient volontairement pas les clés HMAC/AES. Sauvegarder
+séparément les seules variables `WXA_HUB_OPPONENT_*_KEY` du fichier `hub.env` dans
+un coffre chiffré contrôlé par l’hôte. Sans la clé AES, les pseudos d’une base
+restaurée restent définitivement illisibles; ne jamais copier ces clés avec le
+certificat public remis aux membres.
 
 La restauration est exclusivement **à froid** et exige une confirmation :
 

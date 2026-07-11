@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, field_
 
 
 COMMUNITY_SCHEMA_VERSION = "1"
-COMMUNITY_CONSENT_VERSION = "1"
+COMMUNITY_CONSENT_VERSION = "2"
 
 
 class StrictCommunityModel(BaseModel):
@@ -46,7 +46,7 @@ class CommunityJoinRequest(StrictCommunityModel):
     def require_current_consent(self) -> CommunityJoinRequest:
         if not self.consent:
             raise ValueError("Le consentement explicite est obligatoire")
-        if self.consent_version != COMMUNITY_CONSENT_VERSION:
+        if self.consent_version not in {"1", COMMUNITY_CONSENT_VERSION}:
             raise ValueError("Version de consentement non prise en charge")
         return self
 
@@ -60,6 +60,7 @@ class CommunityLocalConfig(StrictCommunityModel):
     last_contact_at: datetime | None = None
     last_error_code: str | None = None
     remote_has_contribution: bool = False
+    opponent_tracking_required: bool = False
 
 
 class CommunityStatusResponse(StrictCommunityModel):
@@ -70,6 +71,8 @@ class CommunityStatusResponse(StrictCommunityModel):
     synced: int = Field(ge=0)
     last_sync_at: datetime | None
     consent_version: str
+    required_consent_version: str = COMMUNITY_CONSENT_VERSION
+    opponent_tracking_enabled: bool = False
     blocked_reason: str | None = None
 
 
@@ -79,6 +82,16 @@ class CommunityJoinResponse(StrictCommunityModel):
     pending: int = Field(ge=0)
     synced: int = Field(ge=0)
     consent_version: str
+
+
+class CommunityConsentRequest(StrictCommunityModel):
+    consent: Literal[True]
+    policy_version: Literal["2"]
+
+
+class CommunityConsentResponse(StrictCommunityModel):
+    policy_version: Literal["2"]
+    opponent_tracking_enabled: Literal[True]
 
 
 class CommunitySyncResponse(StrictCommunityModel):
@@ -101,7 +114,7 @@ class CommunityEnrollmentResponse(StrictCommunityModel):
     device_id: str
     device_token: SecretStr = Field(min_length=1)
     display_name: str
-    policy_version: Literal["1"]
+    policy_version: Literal["1", "2"]
 
 
 class CommunitySyncHubResponse(StrictCommunityModel):
@@ -114,10 +127,12 @@ class CommunityMeResponse(StrictCommunityModel):
     member_id: str
     display_name: str
     has_contribution: StrictBool
+    policy_version: str = "1"
+    opponent_tracking_required: StrictBool = False
 
 
 class CommunityPlayerPayload(StrictCommunityModel):
-    alias: str = Field(pattern=r"^(HERO|OPPONENT_[1-9][0-9]*)$")
+    alias: str = Field(pattern=r"^(HERO|OPPONENT_[12])$")
     seat: int
     position: Literal["BTN", "SB", "BB", "UTG", "CO", "MP", "UNKNOWN"]
     starting_stack: int
@@ -133,7 +148,7 @@ class CommunityPlayerPayload(StrictCommunityModel):
 
 class CommunityActionPayload(StrictCommunityModel):
     sequence: int
-    actor_alias: str = Field(pattern=r"^(HERO|OPPONENT_[1-9][0-9]*)$")
+    actor_alias: str = Field(pattern=r"^(HERO|OPPONENT_[12])$")
     street: str
     action_type: str
     amount: int | None
@@ -186,3 +201,23 @@ class CommunityTournamentPayload(StrictCommunityModel):
     schema_version: Literal["1"] = COMMUNITY_SCHEMA_VERSION
     client_key: str = Field(pattern=r"^[0-9a-f]{64}$")
     tournament: CommunityTournamentData
+
+
+class CommunityOpponentEntryPayload(StrictCommunityModel):
+    alias: str = Field(pattern=r"^OPPONENT_[12]$")
+    display_name: str = Field(min_length=1, max_length=200, repr=False)
+    final_rank: int | None = Field(default=None, ge=1, le=3)
+    reward: float | None = Field(default=None, ge=0)
+    starting_stack: int | None = Field(default=None, ge=0)
+    final_stack: int | None = Field(default=None, ge=0)
+
+
+class CommunityOpponentPayload(StrictCommunityModel):
+    schema_version: Literal["1"] = "1"
+    opponents: list[CommunityOpponentEntryPayload] = Field(max_length=2)
+
+
+class CommunityOpponentSyncHubResponse(StrictCommunityModel):
+    status: Literal["created", "existing"]
+    opponent_count: int = Field(ge=0, le=2)
+    observation_count: int = Field(ge=0)

@@ -38,7 +38,7 @@ if ([string]::IsNullOrWhiteSpace($env:WXA_COMMUNITY_CA_CERT) -and
 
 Push-Location (Join-Path $projectRoot "backend")
 try {
-    & $python -m app.community_cli join --hub-url $HubUrl --display-name $DisplayName --consent --consent-version "1"
+    & $python -m app.community_cli join --hub-url $HubUrl --display-name $DisplayName --consent --consent-version "2"
     exit $LASTEXITCODE
 }
 finally {

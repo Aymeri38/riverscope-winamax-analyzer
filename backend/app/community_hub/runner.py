@@ -106,22 +106,46 @@ def run(
         return SAFETY_EXIT_CODE
 
     database = database_factory(config.database_path)
+    server: uvicorn.Server | None = None
+
+    def stop_server(reason: str) -> None:
+        if server is not None:
+            server.should_exit = True
+        logger.critical("%s Hub en cours d'arret; aucune relance.", reason)
+
+    # Start the irreversible process latch before database initialization and
+    # encrypted-opponent validation.  create_hub_app checks the same interlock
+    # before every decryption, closing the startup race with Winamax.exe.
+    monitor = ProcessGuardMonitor(
+        on_trip=stop_server,
+        detector=detector,
+        interlock=interlock,
+    )
     try:
-        database.initialize()
         try:
+            monitor.start()
+            database.initialize()
             require_winamax_absent(detector=detector, interlock=interlock)
         except AnalysisForbiddenError as exc:
             print(str(exc), file=sys.stderr)
             return SAFETY_EXIT_CODE
         from app.community_hub.api import create_hub_app
 
-        app = create_hub_app(
-            database,
-            docs_enabled=config.docs_enabled,
-            trusted_hosts=config.trusted_hosts,
-            interlock=interlock,
-            hub_config=config,
-        )
+        try:
+            app = create_hub_app(
+                database,
+                docs_enabled=config.docs_enabled,
+                trusted_hosts=config.trusted_hosts,
+                interlock=interlock,
+                hub_config=config,
+            )
+            require_winamax_absent(detector=detector, interlock=interlock)
+        except AnalysisForbiddenError as exc:
+            print(str(exc), file=sys.stderr)
+            return SAFETY_EXIT_CODE
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         server = server_factory(
             uvicorn.Config(
                 app,
@@ -139,25 +163,14 @@ def run(
                 ssl_keyfile=keyfile,
             )
         )
-
-        def stop_server(reason: str) -> None:
-            server.should_exit = True
-            logger.critical("%s Hub en cours d'arret; aucune relance.", reason)
-
-        monitor = ProcessGuardMonitor(
-            on_trip=stop_server,
-            detector=detector,
-            interlock=interlock,
-        )
         try:
-            monitor.start()
+            interlock.ensure_allowed()
             server.run()
         except AnalysisForbiddenError as exc:
             logger.critical("Demarrage du hub refuse par le verrou: %s", exc)
-        finally:
-            monitor.stop()
         return SAFETY_EXIT_CODE if interlock.blocked else 0
     finally:
+        monitor.stop()
         database.dispose()
 
 

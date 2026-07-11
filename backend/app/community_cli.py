@@ -12,7 +12,7 @@ from app.core.process_guard import (
 )
 
 
-COMMUNITY_CONSENT_VERSION = "1"
+COMMUNITY_CONSENT_VERSION = "2"
 
 
 def _parser() -> argparse.ArgumentParser:

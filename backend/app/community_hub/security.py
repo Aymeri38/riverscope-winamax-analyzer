@@ -12,7 +12,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.community_hub.models import Device, Member, SharedTournament
+from app.community_hub.models import (
+    Device,
+    Member,
+    OpponentSyncReceipt,
+    SharedTournament,
+)
 
 
 DEVICE_TOKEN_PREFIX = "wxa_dev_"
@@ -130,4 +135,54 @@ def require_contribution(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Synchronisez au moins une partie terminee avant de consulter les contributions.",
         )
+    return auth
+
+
+def require_opponent_policy(
+    auth: AuthenticatedDevice = Depends(authenticate_device),
+    db: Session = Depends(get_hub_db),
+) -> AuthenticatedDevice:
+    policy_version = db.scalar(
+        select(Member.policy_version).where(Member.id == auth.member_id)
+    )
+    if policy_version != "2":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Le consentement explicite a la politique v2 est requis.",
+        )
+    return auth
+
+
+def require_collective_access(
+    request: Request,
+    auth: AuthenticatedDevice = Depends(require_contribution),
+    db: Session = Depends(get_hub_db),
+) -> AuthenticatedDevice:
+    """Require policy v2 for every shared read when tracking is enabled."""
+    if request.app.state.hub_config.opponent_tracking_enabled:
+        policy_version = db.scalar(
+            select(Member.policy_version).where(Member.id == auth.member_id)
+        )
+        if policy_version != "2":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Le consentement explicite a la politique v2 est requis.",
+            )
+        pending_enrichment = db.scalar(
+            select(SharedTournament.id)
+            .outerjoin(
+                OpponentSyncReceipt,
+                OpponentSyncReceipt.tournament_id == SharedTournament.id,
+            )
+            .where(
+                SharedTournament.member_id == auth.member_id,
+                OpponentSyncReceipt.id.is_(None),
+            )
+            .limit(1)
+        )
+        if pending_enrichment is not None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Synchronisez les enrichissements adverses termines avant consultation.",
+            )
     return auth

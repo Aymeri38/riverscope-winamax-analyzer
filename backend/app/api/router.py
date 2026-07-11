@@ -26,7 +26,8 @@ from app.schemas.api import (
 )
 from app.schemas.contribution import ContributionPreviewResponse
 from app.schemas.community import (
-    COMMUNITY_CONSENT_VERSION,
+    CommunityConsentRequest,
+    CommunityConsentResponse,
     CommunityJoinRequest,
     CommunityJoinResponse,
     CommunityLeaveResponse,
@@ -47,10 +48,12 @@ from app.services.community_client import (
     CommunityClient,
     CommunityAlreadyConfiguredError,
     CommunityContributionRequiredError,
+    CommunityConsentRequiredError,
     CommunityError,
     CommunityNotConfiguredError,
     CommunityOfflineError,
     CommunityPendingError,
+    CommunityResourceNotFoundError,
     CommunityRemoteError,
     ensure_community_post_session,
     sync_community_after_rescan,
@@ -638,6 +641,12 @@ def _raise_community_http(exc: Exception) -> None:
     elif isinstance(exc, CommunityContributionRequiredError):
         code = status.HTTP_409_CONFLICT
         detail = "Synchronisez au moins un tournoi terminé avant consultation."
+    elif isinstance(exc, CommunityConsentRequiredError):
+        code = status.HTTP_409_CONFLICT
+        detail = "Acceptez explicitement la politique communautaire v2 avant consultation."
+    elif isinstance(exc, CommunityResourceNotFoundError):
+        code = status.HTTP_404_NOT_FOUND
+        detail = "Ressource communautaire introuvable."
     elif isinstance(exc, CommunityActivityError):
         code = status.HTTP_423_LOCKED
         detail = "Mode communautaire bloqué pendant une activité potentielle."
@@ -686,7 +695,7 @@ def community_join(
         available=bool(result["available"]),
         pending=int(result["pending"]),
         synced=int(result["synced"]),
-        consent_version=COMMUNITY_CONSENT_VERSION,
+        consent_version=payload.consent_version,
     )
 
 
@@ -722,6 +731,22 @@ def community_sync(request: Request, db: Session = Depends(get_db)) -> Community
     return result
 
 
+@router.post("/community/consent", response_model=CommunityConsentResponse)
+def community_consent(
+    payload: CommunityConsentRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> CommunityConsentResponse:
+    _community_guard(db)
+    try:
+        result = _community_client(request).upgrade_consent(db, payload)
+    except (CommunityError, CommunitySecretError, OSError) as exc:
+        db.rollback()
+        _raise_community_http(exc)
+    _community_guard(db)
+    return result
+
+
 def _community_proxy(
     request: Request,
     db: Session,
@@ -750,6 +775,47 @@ def _validated_public_id(value: str) -> str:
 @router.get("/community/contributors")
 def community_contributors(request: Request, db: Session = Depends(get_db)) -> Any:
     return _community_proxy(request, db, "/v1/contributors")
+
+
+@router.get("/community/contributors/{public_id}/profile")
+def community_contributor_profile(
+    public_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        f"/v1/contributors/{_validated_public_id(public_id)}/profile",
+    )
+
+
+@router.get("/community/opponents")
+def community_opponents(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        "/v1/opponents",
+        {"limit": limit, "offset": offset},
+    )
+
+
+@router.get("/community/opponents/{public_id}/profile")
+def community_opponent_profile(
+    public_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Any:
+    return _community_proxy(
+        request,
+        db,
+        f"/v1/opponents/{_validated_public_id(public_id)}/profile",
+    )
 
 
 @router.get("/community/dashboard")
