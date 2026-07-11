@@ -4,11 +4,11 @@ Projet indépendant, non affilié à Winamax.
 
 ## Résultat
 
-L’application **RiverScope / Winamax Expresso Analyzer** fournit une chaîne complète d’analyse post-session : détection prudente des fichiers terminés, import SQLite idempotent, statistiques, détection explicable de tendances, exploration des parties et replayer manuel. Un hub séparé permet en option de synchroniser les parties terminées d’un groupe autorisé sur le PC d’un hôte.
+L’application **RiverScope / Winamax Expresso Analyzer** fournit une chaîne complète d’analyse post-session : détection prudente des fichiers terminés, import SQLite idempotent, statistiques, détection explicable de tendances, exploration des parties et replayer manuel. Un hub séparé permet en option de synchroniser les parties terminées d’un groupe autorisé sur un serveur contrôlé par l’hôte, PC ou VPS.
 
 La validation publique repose sur des fixtures synthétiques et ne contient aucun volume, résultat, pseudo, chemin, identifiant ou horodatage provenant d’un compte réel.
 
-- **115 tests réussis** ;
+- **115 tests réussis sous Windows, 3 tests Linux ignorés localement et rejoués par la CI Ubuntu** ;
 - build React, TypeScript et Vite réussi ;
 - backend et frontend d’analyse liés exclusivement à `127.0.0.1` ; hub lié à loopback par défaut et TLS obligatoire hors loopback ;
 - refus du démarrage et arrêt coordonné validés lorsque `Winamax.exe` est détecté ;
@@ -35,7 +35,8 @@ Les fixtures publiables sont entièrement synthétiques. Aucun original Winamax 
 - Tables locales : `settings`, `import_files`, `tournaments`, `players`, `tournament_players`, `hands`, `hand_players`, `actions`, `board_cards`, `hero_hole_cards`, `analysis_results`, `leak_flags`, `import_errors` et `community_sync_records`.
 - Base hub séparée avec `members`, `invites`, `devices`, `shared_tournaments`, `shared_hands` et `sync_receipts`.
 - Worker watchdog et rescannage périodique conservateur lorsque le démarrage est autorisé.
-- Scripts Windows : `install.ps1`, `start.ps1`, `hub-start.ps1`, `scripts\hub-admin.ps1`, `scripts\community-join.ps1`, `scripts\rescan.ps1` et `scripts\run-tests.ps1`.
+- Scripts Windows : `install.ps1`, `start.ps1`, `hub-start.ps1`, `scripts\hub-admin.ps1`, `scripts\community-join.ps1`, `scripts\community-install-ca.ps1`, `scripts\rescan.ps1` et `scripts\run-tests.ps1`.
+- Déploiement VPS utilisateur sans `sudo`, dépendances hub minimales, TLS privé, administration, état, arrêt manuel et sauvegarde SQLite cohérente dans `deploy/vps/`.
 
 ## Import et conformité post-session
 
@@ -112,13 +113,13 @@ Capacités livrées :
 - `Cache-Control: no-store`, absence de CORS, `TrustedHost`, taille de corps limitée et pagination ;
 - quotas persistants par membre et limites de débit en mémoire pour enrôlement, synchronisation et autres routes ;
 - écoute loopback par défaut et certificat/clé TLS obligatoires hors loopback ;
-- arrêt sans relance si `Winamax.exe` apparaît sur le PC hôte.
+- arrêt sans relance si `Winamax.exe` apparaît sur l’hôte ; sous Linux, le garde lit uniquement `/proc/<pid>/comm` et échoue fermé si les processus d’autres utilisateurs sont masqués.
 
-Les données persistantes communes résident dans `hub-data\community_hub.db` sur le PC hôte. Les historiques sources et la file technique restent nécessairement sur les PC contributeurs; les réponses consultées ne sont pas importées dans leur SQLite. Le hub ne fournit ni cloud, ni DNS, ni ouverture de pare-feu ou routeur.
+Les données persistantes communes résident uniquement dans le répertoire configuré du serveur hôte. Les historiques sources et la file technique restent nécessairement sur les PC contributeurs ; les réponses consultées ne sont pas importées dans leur SQLite. Le hub n’envoie aucune donnée à un second service applicatif. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots relèvent cependant de l’hébergeur et doivent être inclus dans le consentement du groupe.
 
 Le règlement Winamax publié encadre le regroupement et le partage de mains. Cette fonctionnalité reste donc conditionnée à l’accord déclaré par l’hôte et chaque déploiement tiers doit vérifier sa propre autorisation. Elle ne crée aucun profil adverse global persistant et reste entièrement post-session.
 
-La pseudonymisation ne promet pas l’anonymat : chronologie exacte, cartes, actions, montants et résultats restent corrélables. Le modèle de menace fait confiance au compte Windows et aux processus locaux; une API loopback sans authentification inter-processus reste accessible aux logiciels exécutés sous ce compte. Enfin, un serveur ne peut pas attester qu’un fork open source n’a pas retiré ses propres gardes ou falsifié les dates envoyées. L’hôte doit donc conserver `hub-data/` hors cloud/UNC, protéger son poste, inviter uniquement des membres de confiance et administrer révocations, quotas et sauvegardes.
+La pseudonymisation ne promet pas l’anonymat : chronologie exacte, cartes, actions, montants et résultats restent corrélables. Le modèle de menace fait confiance au compte système du serveur hôte et à ses processus. Enfin, un serveur ne peut pas attester qu’un fork open source n’a pas retiré ses propres gardes ou falsifié les dates envoyées. L’hôte doit donc protéger la base hors synchronisation ou partage réseau, inviter uniquement des membres de confiance et administrer révocations, quotas et sauvegardes.
 
 ## Tests
 
@@ -131,7 +132,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 Résultat validé :
 
 ```text
-115 passed in 11.50s
+115 passed, 3 skipped in 12.29s  # Windows local
 ```
 
 Couverture fonctionnelle :
@@ -169,7 +170,7 @@ L’interface desktop et mobile est vérifiée avec des données synthétiques. 
 
 ## Sécurité et confidentialité
 
-- données d’analyse, exports et sauvegardes conservés sur chaque PC ; données communautaires persistantes conservées dans le projet du PC hôte ;
+- données d’analyse, exports et sauvegardes conservés sur chaque PC ; données communautaires persistantes conservées uniquement sur le serveur choisi par l’hôte ;
 - aucune télémétrie ni publicité ; synchronisation réseau uniquement après appairage explicite au hub ;
 - API d’analyse et frontend liés uniquement à la boucle locale ; hub sur loopback par défaut et TLS obligatoire pour une écoute distante ;
 - mutations navigateur limitées aux origines loopback autorisées, interface non intégrable en iframe et en-têtes CSP/nosniff/referrer appliqués ;
@@ -194,8 +195,8 @@ L’interface desktop et mobile est vérifiée avec des données synthétiques. 
 8. Le connecteur IA est volontairement non implémenté; le cœur local n’en dépend pas.
 9. Le paquet de contribution v1 ne contient pas de lignes brutes et ne peut donc pas reproduire seul un nouveau libellé non reconnu.
 10. Le hub est mono-instance SQLite et vise un groupe privé de taille modérée; ce n’est pas une plateforme Internet multi-région.
-11. L’hôte doit administrer lui-même certificat, DNS éventuel, pare-feu, routeur, sauvegarde de `hub-data/` et disponibilité du PC. Le dépôt n’automatise aucune exposition réseau.
-12. Le hub est volontairement indisponible dès que `Winamax.exe` fonctionne sur le PC hôte; les clients conservent alors leur file locale jusqu’à un redémarrage manuel autorisé.
+11. L’hôte doit administrer certificat, DNS éventuel, pare-feu, sauvegardes et disponibilité du serveur. Le déploiement sans privilèges expose directement un port TLS non privilégié ; une terminaison TLS publique sur 443 et un service système durci nécessitent une intervention `sudo` distincte.
+12. Le hub est volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent alors leur file locale jusqu’à un redémarrage manuel autorisé.
 13. Les alias adverses sont propres à chaque tournoi : les données permettent le suivi global des contributeurs consentants, pas le profilage persistant des adversaires.
 14. L’interface communautaire n’exploite pas encore la route de détail tournoi; elle fournit tableaux filtrés et replayer en lecture seule. Les classifications/profondeurs analytiques restent locales, les stacks du replayer partagé sont statiques et les cartes adverses révélées ne sont pas encore rendues autour de la table.
 15. Le garde sonde les processus toutes les 250 ms. Une requête contenant uniquement des tournois déjà validés terminés peut finir dans la courte fenêtre séparant le démarrage de Winamax et le déclenchement du verrou.

@@ -53,7 +53,7 @@ function blockedReasonLabel(reason?: string | null): string {
   const labels: Record<string, string> = {
     pending_sync: "Vos parties terminées doivent être synchronisées avant l’accès aux données communes.",
     no_contribution: "Synchronisez au moins une partie terminée avant d’accéder aux données communes.",
-    hub_offline: "Le PC hôte du hub est actuellement injoignable.",
+    hub_offline: "Le serveur hôte du hub est actuellement injoignable.",
     activity_detected: "Une activité potentiellement en cours a été détectée ; l’accès reste fermé par précaution.",
     winamax_running: "Winamax.exe est détecté ; le backend communautaire reste arrêté.",
     not_configured: "Cette installation n’est pas encore associée à un hub."
@@ -199,7 +199,7 @@ export function CommunityPage() {
       <div className="community-storage-banner" role="note">
         <Server aria-hidden="true" />
         <div>
-          <strong>Données centrales stockées sur le PC hôte du hub</strong>
+          <strong>Données centrales stockées sur le serveur de l’hôte du hub</strong>
           <span>Les fichiers sources et temporaires restent locaux sur chaque PC. Seules des parties entièrement terminées sont synchronisées par les backends ; le navigateur ne contacte jamais directement le hub.</span>
         </div>
         <ShieldCheck aria-hidden="true" />
@@ -406,7 +406,7 @@ function CommunityOnboarding({
       />
       <div className="community-storage-banner" role="note">
         <Server aria-hidden="true" />
-        <div><strong>Le hub est hébergé sur le PC de votre hôte</strong><span>Le navigateur communique seulement avec votre backend sur 127.0.0.1. L’invitation et le jeton de session ne sont jamais stockés dans le navigateur.</span></div>
+        <div><strong>Le hub est hébergé sur le serveur choisi par votre hôte</strong><span>Le navigateur communique seulement avec votre backend sur 127.0.0.1. L’invitation et le jeton de session ne sont jamais stockés dans le navigateur.</span></div>
         <ShieldCheck aria-hidden="true" />
       </div>
       <div className="community-onboarding-grid">

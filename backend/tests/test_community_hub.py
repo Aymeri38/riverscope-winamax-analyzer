@@ -946,14 +946,16 @@ def test_runner_guard_precedes_database_initialization(tmp_path):
 def test_runtime_guard_requests_server_shutdown_without_restart(tmp_path):
     probe_results = iter((False, False, False, False, True))
     servers = []
+    configs = []
 
     def detector() -> bool:
         return next(probe_results, True)
 
     class FakeServer:
-        def __init__(self, _config) -> None:
+        def __init__(self, config) -> None:
             self.should_exit = False
             self.run_count = 0
+            configs.append(config)
             servers.append(self)
 
         def run(self) -> None:
@@ -975,6 +977,7 @@ def test_runtime_guard_requests_server_shutdown_without_restart(tmp_path):
     assert len(servers) == 1
     assert servers[0].should_exit is True
     assert servers[0].run_count == 1
+    assert configs[0].proxy_headers is False
 
 
 def test_non_loopback_binding_requires_tls():

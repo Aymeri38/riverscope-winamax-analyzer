@@ -1,6 +1,6 @@
 # Winamax Expresso Analyzer
 
-Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur le PC d’un hôte et de filtrer les résultats par contributeur.
+Application locale d’analyse **post-session** des tournois Expresso Winamax. Elle lit les fichiers d’historique et les résumés déjà écrits sur le disque, les importe dans SQLite, calcule les résultats et statistiques du héros, signale des tendances récurrentes et permet de revoir manuellement les mains. Un mode communautaire facultatif permet à un groupe autorisé de centraliser ses parties terminées sur un serveur contrôlé par l’hôte — PC ou VPS — et de filtrer les résultats par contributeur.
 
 Projet indépendant, non affilié à Winamax.
 
@@ -11,7 +11,7 @@ Distribué sous [licence MIT](LICENSE).
 Cette application n’est ni un HUD ni un outil d’aide pendant le jeu. Elle :
 
 - vérifie uniquement si un processus porte exactement le nom `Winamax.exe`, sans lire sa mémoire ni son contenu ;
-- refuse de démarrer si `Winamax.exe` est présent et, s’il apparaît ensuite, arrête le watcher puis le backend sans redémarrage automatique ; le hub applique le même verrou sur le PC hôte ;
+- refuse de démarrer si `Winamax.exe` est présent et, s’il apparaît ensuite, arrête le watcher puis le backend sans redémarrage automatique ; le hub applique le même verrou sur son hôte, sous Windows ou Linux ;
 - n’injecte rien, n’intercepte aucun trafic et ne capture pas l’écran ;
 - n’automatise aucune action et ne communique jamais avec Winamax ;
 - n’accède ni au compte, ni aux cookies, ni au navigateur ;
@@ -43,7 +43,7 @@ cd .\winamax-analyzer
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Le script installe FastAPI, SQLAlchemy, watchdog, pytest et les dépendances frontend, compile React et initialise SQLite. Les téléchargements ne servent qu’à l’installation explicite; le fonctionnement quotidien ne requiert aucun cloud.
+Le script installe FastAPI, SQLAlchemy, watchdog, pytest et les dépendances frontend, compile React et initialise SQLite. Les téléchargements ne servent qu’à l’installation explicite. Hors mode communautaire, le fonctionnement quotidien reste entièrement local ; après appairage explicite, le backend contacte uniquement le hub configuré par l’utilisateur.
 
 ## Lancement
 
@@ -160,14 +160,14 @@ Cette pseudonymisation n’est pas un anonymat : dates exactes, cartes, séquenc
 - chaque joueur conserve forcément ses historiques Winamax et sa base d’analyse source sur son propre PC ;
 - une file technique locale garde l’état des envois, sans dupliquer les payloads ni le jeton en clair ;
 - le jeton du hub est protégé par Windows DPAPI et n’est jamais donné à React ou stocké dans `localStorage` ;
-- les données communautaires persistantes sont stockées uniquement dans `hub-data\community_hub.db` sur le PC hôte ;
+- les données communautaires persistantes sont stockées uniquement dans le répertoire configuré du serveur hôte (`hub-data\community_hub.db` sous Windows, `~/riverscope-hub/data/community_hub.db` avec le déploiement VPS fourni) ;
 - les réponses consultées par les membres transitent en mémoire via leur backend local avec `Cache-Control: no-store` et ne sont pas recopiées dans leur SQLite.
 
-« Stockage central uniquement chez l’hôte » ne signifie donc pas que les fichiers sources disparaissent des PC contributeurs. Le hub ne contacte aucun cloud et n’ajoute aucune télémétrie.
+« Stockage central uniquement sur le serveur choisi par l’hôte » ne signifie donc pas que les fichiers sources disparaissent des PC contributeurs. Le hub ne transmet les données à aucun autre service applicatif et n’ajoute aucune télémétrie. Sur un VPS loué, le disque, le réseau et d’éventuels snapshots restent nécessairement dans le périmètre de l’hébergeur : les membres doivent en être informés avant de consentir.
 
-Conserver `hub-data/` sur un disque local du PC hôte, hors dossier OneDrive ou autre synchronisation cloud et hors partage UNC. Le compte Windows et les processus locaux sont dans le périmètre de confiance : tout programme exécuté sous ce compte peut contacter l’API loopback tant qu’elle fonctionne. DPAPI empêche le stockage du bearer en clair, mais ne transforme pas un poste compromis en environnement sûr.
+Conserver la base sur un disque local du serveur hôte, hors dossier OneDrive, montage synchronisé ou partage UNC. Le compte système qui exécute le hub et les autres processus de cet hôte sont dans le périmètre de confiance. DPAPI protège le bearer uniquement sur les PC clients Windows ; il ne transforme pas un poste compromis en environnement sûr.
 
-### Initialiser le hub sur le PC hôte
+### Initialiser le hub sur un PC hôte Windows
 
 Fermer Winamax, installer le projet, définir les deux variables d’accord ci-dessus, puis exécuter :
 
@@ -188,6 +188,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\hub-admin.ps1 create-invite -
 Le membre rejoint ensuite avec cette invitation et exactement le même nom d’affichage. Le hub déduplique le contenu indépendamment du nouveau secret HMAC de l’appareil.
 
 Par défaut le hub écoute seulement sur `127.0.0.1:8040`. Pour des amis situés sur d’autres PC, il faut fournir un certificat et une clé TLS valides, définir `WXA_HUB_TRUSTED_HOSTS`, puis choisir explicitement une adresse d’écoute non-loopback. Le runner refuse toute écoute distante en HTTP clair. Si une autorité privée est utilisée, chaque membre peut définir `WXA_COMMUNITY_CA_CERT` vers le certificat public de cette autorité ; il n’existe aucun mode `verify=False`. Le dépôt n’ouvre aucun port Windows, ne modifie ni routeur ni DNS et n’installe aucun VPN ; cette exposition réseau reste une opération d’administration distincte.
+
+### Déployer le hub sur un VPS Linux
+
+Un déploiement utilisateur Ubuntu sans `sudo`, sans Docker et sans redémarrage automatique est fourni dans [`docs/VPS_DEPLOYMENT.md`](docs/VPS_DEPLOYMENT.md). Il installe uniquement les dépendances du hub sous `~/riverscope-hub`, conserve la base et les secrets avec des permissions privées, génère une autorité TLS locale et expose directement Uvicorn sur un port non privilégié. Le certificat public de cette autorité doit être remis séparément à chaque membre puis référencé par `WXA_COMMUNITY_CA_CERT`.
+
+Sur un PC membre, `scripts\community-install-ca.ps1 -SourcePath <certificat-public.crt>` valide et copie cette autorité dans `data\community-ca.crt`, sans modifier le magasin de certificats Windows. `start.ps1` et `community-join.ps1` la chargent ensuite automatiquement. Comparer son SHA-256 avec une empreinte communiquée séparément par l’hôte avant l’installation.
+
+Sous Linux, le verrou inspecte uniquement le nom de tâche exposé par `/proc/<pid>/comm`; il ne lit ni mémoire, ni arguments, ni environnement. Il refuse de démarrer si la vue de `/proc` masque les processus d’autres utilisateurs. Le script de lancement en arrière-plan ne contient aucune boucle de relance : après un arrêt, y compris au code de sécurité `23`, une intervention manuelle est obligatoire.
 
 Exemple de variables, à adapter au certificat et au nom réellement utilisés :
 
@@ -216,7 +224,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\community-join.ps1 -HubUrl "h
 
 **Quitter le hub** tente d’abord de révoquer l’appareil distant, puis efface toujours le jeton DPAPI et la file de ce PC. Si le hub est hors ligne, l’interface demande de faire confirmer la révocation par l’hôte ; les contributions déjà stockées restent présentes jusqu’à leur suppression administrative.
 
-Si Winamax démarre sur un PC membre, son analyseur, watcher et backend s’arrêtent. S’il démarre sur le PC hôte, le hub s’arrête également. Aucun composant ne redémarre seul ; les files locales attendent le prochain lancement manuel autorisé.
+Si Winamax démarre sur un PC membre, son analyseur, watcher et backend s’arrêtent. Si un processus nommé exactement `Winamax.exe` apparaît sur l’hôte du hub, sous Windows ou Linux/Wine, le hub s’arrête également. Aucun composant ne redémarre seul ; les files locales attendent le prochain lancement manuel autorisé.
 
 Ces garanties décrivent le client et le hub officiels de ce dépôt. Comme le code est public, le serveur ne peut pas prouver qu’un client modifié conserve son verrou de processus ni que ses horodatages déclarés sont honnêtes. Le hub refuse les données récentes qu’il reçoit, mais l’hôte doit inviter uniquement des membres de confiance et rester dans le périmètre de l’accord obtenu.
 
@@ -226,7 +234,7 @@ Ces garanties décrivent le client et le hub officiels de ce dépôt. Comme le c
 powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1
 ```
 
-La validation courante compte **115 tests réussis**. Ils couvrent parser/résumé, incomplet, CP1252, doublons, réimport, garde temporelle, interverrouillage `Winamax.exe`, export agrégé et canaris privés, export CSV minimisé, VPIP/PFR/3-bet, ROI/ITM/chipEV, sessions, équité, API et base vide, ainsi que client/hub, consentement, invitations, authentification, idempotence inter-appareils, révocation, quotas, limitation de débit, filtre contributeur, confidentialité, garde 60 secondes, TLS, DPAPI, protections navigateur et contrat replayer.
+La validation locale courante compte **115 tests réussis sous Windows et 3 tests Linux ignorés sur cette plateforme**. La CI publique rejoue toute la suite sous Windows et Ubuntu ; les cas Linux vérifient en plus la lecture minimale de `/proc`, la visibilité inter-utilisateurs et l’échec fermé. La couverture inclut parser/résumé, incomplet, CP1252, doublons, réimport, garde temporelle, interverrouillage `Winamax.exe`, export agrégé et canaris privés, export CSV minimisé, VPIP/PFR/3-bet, ROI/ITM/chipEV, sessions, équité, API et base vide, ainsi que client/hub, consentement, invitations, authentification, idempotence inter-appareils, révocation, quotas, limitation de débit, filtre contributeur, confidentialité, garde 60 secondes, TLS, DPAPI, protections navigateur et contrat replayer.
 
 ## Limites connues
 
@@ -236,8 +244,8 @@ La validation courante compte **115 tests réussis**. Ils couvrent parser/résum
 - L’activation du démarrage à l’ouverture de Windows est conservée comme préférence, mais aucune tâche planifiée ou clé de registre n’est créée automatiquement afin de respecter la règle de ne rien modifier hors du projet. Toute intégration future devra passer par le même démarrage protégé et ne jamais relancer l’application tant que Winamax est présent.
 - Le worker automatique fonctionne uniquement tant que `start.ps1` et le backend sont autorisés à tourner; la détection de `Winamax.exe` les arrête sans relance. Produire ultérieurement un `.exe` pourra améliorer l’intégration Windows sans assouplir cet interverrouillage.
 - Les recommandations sont pédagogiques et générales; elles ne remplacent pas une analyse de range contextualisée.
-- Le hub SQLite vise un groupe privé de taille modérée. Certificat, nom DNS éventuel, pare-feu, routeur, sauvegarde de `hub-data/` et disponibilité du PC hôte restent à administrer manuellement.
-- Le hub devient volontairement indisponible dès que `Winamax.exe` fonctionne sur le PC hôte; les clients conservent leur file locale jusqu’au prochain lancement manuel autorisé.
+- Le hub SQLite vise un groupe privé de taille modérée. Certificat, nom DNS éventuel, pare-feu, sauvegarde de la base et disponibilité du serveur hôte restent à administrer manuellement. Un VPS implique également les conditions de stockage et de sauvegarde de son hébergeur.
+- Le hub devient volontairement indisponible dès que `Winamax.exe` fonctionne sur son hôte ; les clients conservent leur file locale jusqu’au prochain lancement manuel autorisé.
 - Les adversaires n’ont aucun identifiant persistant entre tournois. Le suivi global porte uniquement sur les contributeurs qui ont rejoint le hub et consenti à l’envoi.
 - La détection de `Winamax.exe` est sondée toutes les 250 ms. Une requête post-session déjà en vol peut finir pendant cette très courte fenêtre; son payload a déjà été limité à des tournois confirmés terminés et aucune donnée de la nouvelle partie n’est lue.
 - L’API du hub expose le détail d’un tournoi, mais l’interface communautaire actuelle reste une vue en lecture seule composée des tableaux Parties/Mains et du replayer. Elle n’affiche pas encore une page de détail communautaire équivalente à la page locale.

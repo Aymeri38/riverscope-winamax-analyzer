@@ -14,4 +14,4 @@ Ne publiez jamais `data/`, `hub-data/`, un export du hub, une invitation, un jet
 
 Un nouveau cas de parsing doit être recréé comme fixture entièrement synthétique : identifiants et dates inventés, cartes/montants/actions indépendants du jeu réel, et aucune simple copie ou permutation d’un historique existant.
 
-Pour signaler une vulnérabilité, n’en publiez pas les détails ni les données associées. Utilisez le signalement privé de vulnérabilité GitHub lorsqu’il est disponible ; sinon, ouvrez une issue sans donnée sensible afin de demander un canal privé.
+Pour signaler une vulnérabilité, n’en publiez pas les détails ni les données associées. Suivez [`SECURITY.md`](SECURITY.md) et utilisez le signalement privé de vulnérabilité GitHub lorsqu’il est disponible ; sinon, ouvrez une issue sans donnée sensible afin de demander un canal privé.

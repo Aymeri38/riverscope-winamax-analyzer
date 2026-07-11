@@ -131,6 +131,10 @@ def run(
                 workers=1,
                 log_level="info",
                 access_log=False,
+                # The hub either receives clients directly or sits behind an
+                # explicitly configured edge. Never let a request header
+                # rewrite the peer address used by application rate limits.
+                proxy_headers=False,
                 ssl_certfile=certfile,
                 ssl_keyfile=keyfile,
             )

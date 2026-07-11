@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +14,7 @@ from app.core.process_guard import (
     AnalysisInterlock,
     ProcessGuardMonitor,
     ProcessInspectionError,
+    _linux_process_names,
     is_winamax_running,
     require_winamax_absent,
 )
@@ -29,6 +33,42 @@ from app.workers.history_watcher import HistoryWatcher
 )
 def test_exact_process_name_detection(names: list[str], expected: bool) -> None:
     assert is_winamax_running(lambda: names) is expected
+
+
+def _write_linux_comm(proc_root: Path, pid: int, name: str) -> None:
+    process_dir = proc_root / str(pid)
+    process_dir.mkdir(parents=True)
+    (process_dir / "comm").write_text(name + "\n", encoding="utf-8")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_linux_probe_reads_only_comm_names(tmp_path: Path) -> None:
+    _write_linux_comm(tmp_path, os.getpid(), "pytest")
+    _write_linux_comm(tmp_path, 1, "systemd")
+    _write_linux_comm(tmp_path, 42001, "Winamax.exe")
+    (tmp_path / "not-a-process").mkdir()
+
+    assert set(_linux_process_names(tmp_path)) == {
+        "systemd",
+        "pytest",
+        "Winamax.exe",
+    }
+    assert is_winamax_running(lambda: _linux_process_names(tmp_path)) is True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_linux_probe_fails_closed_when_own_comm_is_missing(tmp_path: Path) -> None:
+    _write_linux_comm(tmp_path, 1, "systemd")
+    _write_linux_comm(tmp_path, 42001, "python3")
+    with pytest.raises(ProcessInspectionError):
+        _linux_process_names(tmp_path)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_linux_probe_fails_closed_when_other_users_are_hidden(tmp_path: Path) -> None:
+    _write_linux_comm(tmp_path, os.getpid(), "pytest")
+    with pytest.raises(ProcessInspectionError):
+        _linux_process_names(tmp_path)
 
 
 def test_process_probe_failure_is_explicit_and_fail_closed() -> None:

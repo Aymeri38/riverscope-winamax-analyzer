@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$BindHost = $(if ($env:WXA_HUB_HOST) { $env:WXA_HUB_HOST } else { "127.0.0.1" }),
     [int]$Port = $(if ($env:WXA_HUB_PORT) { [int]$env:WXA_HUB_PORT } else { 8040 }),

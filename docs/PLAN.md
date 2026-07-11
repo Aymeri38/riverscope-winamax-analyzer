@@ -47,7 +47,7 @@ L’application n’inspecte ni mémoire, trafic réseau, écran, fenêtre, cook
 
 ## Mode communautaire
 
-Le partage centralisé est implémenté comme composant séparé, désactivé sans `WXA_COMMUNITY_APPROVAL_ACK=YES` et une référence d’accord non vide. Le hub persiste uniquement dans `hub-data/` sur le PC hôte, écoute sur loopback par défaut et exige TLS pour toute adresse distante. Il s’arrête sans relance si `Winamax.exe` apparaît sur l’hôte.
+Le partage centralisé est implémenté comme composant séparé, désactivé sans `WXA_COMMUNITY_APPROVAL_ACK=YES` et une référence d’accord non vide. Le hub persiste uniquement dans le répertoire local configuré de l’hôte — PC ou VPS —, écoute sur loopback par défaut et exige TLS pour toute adresse distante. Il s’arrête sans relance si `Winamax.exe` apparaît sur l’hôte. Le déploiement VPS conserve le même verrou via une lecture minimale de `/proc/<pid>/comm` et refuse les vues de processus masquées.
 
 Chaque client rejoint le groupe avec une invitation aléatoire à usage unique et un consentement explicite. L’accès commun reste bloqué tant que ses tournois terminés sont en attente locale et le hub exige au moins une contribution avant toute lecture. Les secrets restent hors du navigateur et sont protégés avec DPAPI sous Windows.
 

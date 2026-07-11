@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$HubUrl,
     [Parameter(Mandatory = $true)]
@@ -28,6 +28,12 @@ if ($winamaxProcesses.Count -gt 0) {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     [Console]::Error.WriteLine("Runtime Python introuvable. Exécutez install.ps1.")
     exit 1
+}
+
+$communityCa = Join-Path $projectRoot 'data\community-ca.crt'
+if ([string]::IsNullOrWhiteSpace($env:WXA_COMMUNITY_CA_CERT) -and
+    (Test-Path -LiteralPath $communityCa -PathType Leaf)) {
+    $env:WXA_COMMUNITY_CA_CERT = $communityCa
 }
 
 Push-Location (Join-Path $projectRoot "backend")

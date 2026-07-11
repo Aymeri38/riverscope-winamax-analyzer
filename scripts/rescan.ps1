@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Python = Join-Path $ProjectRoot '.runtime\python\python.exe'
 $SafetyExitCode = 23
@@ -15,7 +15,7 @@ catch {
 }
 
 if ($WinamaxProcesses.Count -gt 0) {
-    Write-Host 'Rescannage refusé : Winamax.exe est en cours d’exécution.' -ForegroundColor Red
+    Write-Host "Rescannage refusé : Winamax.exe est en cours d’exécution." -ForegroundColor Red
     exit $SafetyExitCode
 }
 
